@@ -481,7 +481,14 @@ static void note_texture_use(void)
                     const char *e = getenv("RECOMP_TEX_DUMP_EVERY");
                     every = e ? atoi(e) : 0;
                 }
-                if (every > 0 && ++binds % (unsigned)every == 0
+                static int fmt = -2;
+                if (fmt == -2) {
+                    const char *e = getenv("RECOMP_TEX_DUMP_FMT");
+                    fmt = e ? (int)strtol(e, NULL, 16) : -1;
+                }
+                if (every > 0 && (fmt < 0 || (int)((s_gpu.texs[0].color >> 8) & 0xFF) == fmt
+                                  || (int)s_gpu.texs[0].color == fmt)
+                    && ++binds % (unsigned)every == 0
                     && seq < TEX_DUMP_SEQ_MAX)
                     dump_texture_bmp(TEX_DUMP_SEQ_BASE + seq++);
             }
