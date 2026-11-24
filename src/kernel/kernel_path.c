@@ -643,6 +643,8 @@ translate:
 #include <sys/types.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <strings.h>
 
 static char s_game_dir[MAX_PATH];
 static char s_save_dir[MAX_PATH];
@@ -676,6 +678,75 @@ static void mkdir_p(const char* path)
     }
     if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
         xbox_log(XBOX_LOG_WARN, XBOX_LOG_PATH, "mkdir %s: %s", tmp, strerror(errno));
+}
+
+/* The Xbox's file systems ignore case and titles rely on it: a title asks
+ * for D:\Data\movies\INTRO.bik where the disc has Movies/intro.bik. Each
+ * component of `path` after its first `keep` bytes takes the spelling of the
+ * entry in its directory that matches it ignoring case. A component nothing
+ * matches -- a file about to be created -- and everything after it stays as
+ * asked.
+ *
+ * Every component is read from its directory, including ones lstat already
+ * finds. Returning early when the path exists as spelled is tempting, and was
+ * how this was written: the folding is only needed where the open would
+ * otherwise fail. True of the open, false of the name. On a case-insensitive
+ * host lstat succeeds for any spelling, so macOS handed back whatever the
+ * title asked for while Linux handed back what the disc holds, and two hosts
+ * disagreeing about a translated path is worse than the readdir. */
+static void fold_case(char *path, size_t keep)
+{
+    char *comp = path + keep;
+
+    while (*comp == '/')
+        comp++;
+
+    while (*comp) {
+        char *end = strchr(comp, '/');
+        char save = end ? *end : '\0';
+        char cand[256];
+        int exact = 0, folded = 0;
+        size_t len;
+        DIR *d;
+        struct dirent *e;
+        char parent_end;
+
+        if (end)
+            *end = '\0';
+        len = strlen(comp);
+
+        parent_end = comp[-1];
+        comp[-1] = '\0';
+        d = opendir(comp == path + 1 ? "/" : path);
+        comp[-1] = parent_end;
+
+        /* `comp` is left alone until the directory has been read. Folding it
+         * in place mid-scan would leave later comparisons matching the
+         * spelling this loop just wrote rather than the one the caller asked
+         * for, so an exact match after a case-insensitive one would never be
+         * seen. */
+        while (d && (e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, comp) == 0) {
+                exact = 1;                        /* as asked: nothing to do */
+                break;
+            }
+            if (!folded && len < sizeof cand && strlen(e->d_name) == len
+                    && strcasecmp(e->d_name, comp) == 0) {
+                memcpy(cand, e->d_name, len);
+                folded = 1;                       /* keep reading for an exact */
+            }
+        }
+        if (d)
+            closedir(d);
+        if (!exact && folded)
+            memcpy(comp, cand, len);              /* case differs, length does not */
+
+        if (end)
+            *end = save;
+        if (!(exact || folded) || !end)
+            return;
+        comp = end + 1;
+    }
 }
 
 void xbox_path_init(const char* game_dir, const char* save_dir)
@@ -847,6 +918,7 @@ translate:
             while (n > 1 && host_path_buf[n - 1] == '/')
                 host_path_buf[--n] = '\0';
         }
+        fold_case(host_path_buf, strlen(base_dir));
 
         XBOX_TRACE(XBOX_LOG_PATH, "%s -> %s", xbox_path, host_path_buf);
         /* As the Win32 backend does: the bridge reads back the host path
