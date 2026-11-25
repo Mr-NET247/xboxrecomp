@@ -52,6 +52,9 @@
 #include "nv2a_tex_dump.h"
 #include "d3d8_glsl.h"
 #include "nv2a_basic_glsl.h"
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#include <pthread.h>
 
 ptrdiff_t xbox_GetMemoryOffset(void);
 extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
@@ -103,6 +106,16 @@ static PFN_vkCmdPushDescriptorSetKHR s_push_desc;   /* NULL: sets from slot pool
 static PFN_vkCmdBeginRenderingKHR    s_begin_rendering;
 static PFN_vkCmdEndRenderingKHR      s_end_rendering;
 static int                           s_legacy;   /* no dynamic rendering: VkRenderPass */
+
+/* The presenter's Vulkan window and its surface (Android). */
+SDL_Window *xbox_FramebufferWindowVulkan(void);
+static SDL_Window  *s_win;
+static VkSurfaceKHR s_surf;
+static int          s_have_swapchain;   /* VK_KHR_swapchain on the device */
+/* Every submit and present holds this: the presenter thread shares the queue. */
+static pthread_mutex_t s_qlock = PTHREAD_MUTEX_INITIALIZER;
+static void nv2a_vk_queue_lock(void) { pthread_mutex_lock(&s_qlock); }
+static void nv2a_vk_queue_unlock(void) { pthread_mutex_unlock(&s_qlock); }
 static shaderc_compiler_t            s_cc;
 static shaderc_compile_options_t     s_copt;
 static VkShaderModule    s_vs_pass, s_fs_basic;
@@ -200,6 +213,9 @@ typedef struct {
     int             up_used;
 } Slot;
 static VkCommandPool s_pool;
+/* The next submit waits on s_sub_wait (a swapchain acquire) at the
+ * transfer and colour stages and signals s_sub_signal (its present). */
+static VkSemaphore s_sub_wait, s_sub_signal;
 static Slot     s_slot[SLOTS];
 static Slot    *s_cur;          /* recording, or NULL */
 static uint64_t s_serial = 1;   /* the next slot's serial */
@@ -242,6 +258,29 @@ static void img_release(Img *im)
     s_grave[s_ngrave].serial = s_cur ? s_cur->serial : s_last;
     s_ngrave++;
     memset(im, 0, sizeof *im);
+}
+
+/* A fence wait that says so when it runs long: 2 s at a time, each
+ * overrun logged with where and which slot, and a lost device reported
+ * (a GPU fault ends every wait with VK_ERROR_DEVICE_LOST). */
+static void fence_wait(VkFence f, const char *where, uint64_t serial)
+{
+    unsigned waited = 0;
+    for (;;) {
+        VkResult r = vkWaitForFences(s_dev, 1, &f, VK_TRUE, 2000000000ull);
+        if (r == VK_SUCCESS)
+            return;
+        if (r != VK_TIMEOUT) {
+            fprintf(stderr, LOGP "fence wait at %s (serial %llu): error %d%s\n", where,
+                    (unsigned long long)serial, (int)r,
+                    r == VK_ERROR_DEVICE_LOST ? " (device lost)" : "");
+            return;
+        }
+        waited += 2;
+        fprintf(stderr, LOGP "fence wait at %s (serial %llu): %u s and counting\n", where,
+                (unsigned long long)serial, waited);
+        fflush(stderr);
+    }
 }
 
 static void slots_poll(void)
@@ -287,7 +326,7 @@ static void wait_all(void)
     size_t i;
     for (i = 0; i < SLOTS; i++)
         if (s_slot[i].busy)
-            vkWaitForFences(s_dev, 1, &s_slot[i].fence, VK_TRUE, UINT64_MAX);
+            fence_wait(s_slot[i].fence, "wait_all", s_slot[i].serial);
     slots_poll();
     s_done = s_last;
     slots_poll();
@@ -332,7 +371,7 @@ static void ensure_cmd(void)
             for (i = 1; i < SLOTS; i++)
                 if (s_slot[i].serial < old->serial)
                     old = &s_slot[i];
-            vkWaitForFences(s_dev, 1, &old->fence, VK_TRUE, UINT64_MAX);
+            fence_wait(old->fence, "ensure_cmd", old->serial);
             slots_poll();
         }
     }
@@ -419,7 +458,26 @@ static void flush(int wait)
         cbs[n++] = s_cur->cmd;
         si.commandBufferCount = n;
         si.pCommandBuffers = cbs;
-        VKC(vkQueueSubmit(s_queue, 1, &si, s_cur->fence), "vkQueueSubmit");
+        {
+            static const VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            if (s_sub_wait) {
+                si.waitSemaphoreCount = 1;
+                si.pWaitSemaphores = &s_sub_wait;
+                si.pWaitDstStageMask = &ws;
+            }
+            if (s_sub_signal) {
+                si.signalSemaphoreCount = 1;
+                si.pSignalSemaphores = &s_sub_signal;
+            }
+        }
+        nv2a_vk_queue_lock();
+        {
+            VkResult sr = vkQueueSubmit(s_queue, 1, &si, s_cur->fence);
+            if (sr != VK_SUCCESS)
+                fprintf(stderr, LOGP "vkQueueSubmit failed: %d%s\n", (int)sr,
+                        sr == VK_ERROR_DEVICE_LOST ? " (device lost)" : "");
+        }
+        nv2a_vk_queue_unlock();
         s_cur->busy = 1;
         s_last = s_cur->serial;
         s_cur = NULL;
@@ -508,7 +566,7 @@ static int init_device(void)
 {
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-    const char *iext[4];
+    const char *iext[16];
     uint32_t niext = 0, n = 0, i;
     VkExtensionProperties *ie = NULL, *de = NULL;
     VkPhysicalDevice pd[16];
@@ -517,7 +575,7 @@ static int init_device(void)
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR };
     VkDeviceCreateInfo dci = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
     VkDeviceQueueCreateInfo qci = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
-    const char *dext[8];
+    const char *dext[10];
     uint32_t ndext = 0, nde = 0, nq = 0;
     float prio = 1.0f;
     VkQueueFamilyProperties qf[16];
@@ -532,6 +590,14 @@ static int init_device(void)
     }
     if (has_ext(ie, n, "VK_KHR_get_physical_device_properties2"))
         iext[niext++] = "VK_KHR_get_physical_device_properties2";
+    /* The presenter's Vulkan window (Android): SDL's surface extensions. */
+    s_win = xbox_FramebufferWindowVulkan();
+    if (s_win) {
+        Uint32 ne = 0, k;
+        const char *const *se = SDL_Vulkan_GetInstanceExtensions(&ne);
+        for (k = 0; se && k < ne && niext < 16; k++)
+            iext[niext++] = se[k];
+    }
     free(ie);
     app.pApplicationName = "xboxrecomp";
     /* 1.3: a driver hides its 1.3 core entry points (vkCmdBeginRendering)
@@ -545,6 +611,10 @@ static int init_device(void)
         fprintf(stderr, LOGP "no Vulkan instance\n");
         return 0;
     }
+    /* The surface now if Android has the window ready, else at a later
+     * flip (sw_surface): the guest can start before the activity shows. */
+    if (s_win && !SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf))
+        s_surf = VK_NULL_HANDLE;
     n = 16;
     if (vkEnumeratePhysicalDevices(s_inst, &n, pd) < 0 || !n) {
         fprintf(stderr, LOGP "no Vulkan device\n");
@@ -590,6 +660,19 @@ static int init_device(void)
             dext[ndext++] = "VK_KHR_depth_stencil_resolve";
         if (has_ext(de, nde, "VK_KHR_create_renderpass2"))
             dext[ndext++] = "VK_KHR_create_renderpass2";
+    }
+    if (s_win && has_ext(de, nde, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        VkBool32 ok = VK_TRUE;
+        if (s_surf)
+            vkGetPhysicalDeviceSurfaceSupportKHR(s_pdev, s_qfam, s_surf, &ok);
+        if (ok) {
+            dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+            s_have_swapchain = 1;
+        }
+    }
+    if (s_surf && !s_have_swapchain) {
+        vkDestroySurfaceKHR(s_inst, s_surf, NULL);
+        s_surf = VK_NULL_HANDLE;
     }
     if (has_ext(de, nde, "VK_KHR_portability_subset"))
         dext[ndext++] = "VK_KHR_portability_subset";
@@ -754,6 +837,10 @@ static int init(void)
         fprintf(stderr, LOGP "initialisation failed: staying on the CPU rasteriser\n");
         return 0;
     }
+    fprintf(stderr, LOGP "window surface: %s\n",
+            s_surf ? "yes, swapchain present"
+            : s_have_swapchain ? "not ready yet, made at a later flip"
+            : "no, present by readback");
     fprintf(stderr, LOGP "device up: %s (Vulkan %u.%u.%u), depth %s, BC %d, aniso %d,"
             " precise occlusion %d, push descriptors %d, %s; present by readback, write-back"
             " on demand\n",
@@ -3379,6 +3466,451 @@ static void host_dump(const uint8_t *px, uint32_t stride, uint32_t w, uint32_t h
     fclose(f);
 }
 
+/* ---- the window's swapchain (Android) ------------------------------------------
+ *
+ * With the presenter's Vulkan window (fb_present_sdl.c, Android) the frame
+ * goes to the screen from here: at the flip the target is blitted into the
+ * swapchain image, letterboxed at its own shape, the touch controls drawn
+ * over it (touch_pad_shapes), and the image presented. No readback, no SDL
+ * renderer, and no wait for the GPU at each flip: the readback path held
+ * the guest for every frame. A lost or out-of-date swapchain is made again
+ * at a later flip (Android takes the surface away while the app is paused). */
+typedef struct { float x, y, r, c[4]; int fill; } VkTouchShape;
+int touch_pad_shapes(VkTouchShape *out, int max, int w, int h);
+
+static VkSwapchainKHR s_swap;
+static VkImage        s_sw_img[8];
+static VkImageView    s_sw_view[8];
+static VkFramebuffer  s_sw_fb[8];      /* render pass objects only */
+static uint32_t       s_sw_n;
+static VkExtent2D     s_sw_ext;
+static VkFormat       s_sw_fmt;
+static VkSemaphore    s_sw_acq[SLOTS], s_sw_done[8];
+static VkPipeline     s_ov_pso;
+static VkPipelineLayout s_ov_layout;
+static VkRenderPass   s_ov_rp;
+static uint64_t       s_sw_retry, s_sw_presents;
+
+static const char s_ov_vs[] =
+    "#version 450\n"
+    "layout(push_constant) uniform P { vec4 c; vec4 col; vec4 scr; } p;\n"
+    "layout(location = 0) out vec2 v_pos;\n"
+    "void main() {\n"
+    "    vec2 k = vec2((gl_VertexIndex & 1) != 0 ? 1.0 : -1.0,\n"
+    "                  (gl_VertexIndex == 2 || gl_VertexIndex >= 4) ? 1.0 : -1.0);\n"
+    "    if (gl_VertexIndex == 3) k = vec2(1.0, -1.0);\n"
+    "    if (gl_VertexIndex == 4) k = vec2(-1.0, 1.0);\n"
+    "    if (gl_VertexIndex == 5) k = vec2(1.0, 1.0);\n"
+    "    v_pos = p.c.xy + k * (p.c.z + 2.0);\n"
+    "    gl_Position = vec4(v_pos / p.scr.xy * 2.0 - 1.0, 0.0, 1.0);\n"
+    "}\n";
+static const char s_ov_fs[] =
+    "#version 450\n"
+    "layout(push_constant) uniform P { vec4 c; vec4 col; vec4 scr; } p;\n"
+    "layout(location = 0) in vec2 v_pos;\n"
+    "layout(location = 0) out vec4 o;\n"
+    "void main() {\n"
+    "    float d = length(v_pos - p.c.xy);\n"
+    "    float a = p.c.w != 0.0 ? clamp(p.c.z - d + 0.5, 0.0, 1.0)\n"
+    "                           : clamp(1.5 - abs(d - p.c.z), 0.0, 1.0);\n"
+    "    o = vec4(p.col.rgb, p.col.a * a);\n"
+    "}\n";
+
+static void sw_destroy(void)
+{
+    uint32_t i;
+    if (!s_swap)
+        return;
+    nv2a_vk_queue_lock();
+    vkDeviceWaitIdle(s_dev);
+    nv2a_vk_queue_unlock();
+    for (i = 0; i < s_sw_n; i++) {
+        if (s_sw_fb[i]) vkDestroyFramebuffer(s_dev, s_sw_fb[i], NULL);
+        if (s_sw_view[i]) vkDestroyImageView(s_dev, s_sw_view[i], NULL);
+        s_sw_fb[i] = VK_NULL_HANDLE;
+        s_sw_view[i] = VK_NULL_HANDLE;
+    }
+    vkDestroySwapchainKHR(s_dev, s_swap, NULL);
+    s_swap = VK_NULL_HANDLE;
+    s_sw_n = 0;
+}
+
+static VkShaderModule sw_module(const char *src, shaderc_shader_kind kind)
+{
+    shaderc_compilation_result_t r = shaderc_compile_into_spv(s_cc, src, strlen(src), kind,
+                                                              "overlay", "main", s_copt);
+    VkShaderModuleCreateInfo mi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (shaderc_result_get_compilation_status(r) == shaderc_compilation_status_success) {
+        mi.codeSize = shaderc_result_get_length(r);
+        mi.pCode = (const uint32_t *)shaderc_result_get_bytes(r);
+        vkCreateShaderModule(s_dev, &mi, NULL, &m);
+    } else {
+        fprintf(stderr, LOGP "overlay shader: %s\n", shaderc_result_get_error_message(r));
+    }
+    shaderc_result_release(r);
+    return m;
+}
+
+/* The touch overlay's pipeline for the swapchain's format. */
+static int ov_init(void)
+{
+    VkShaderModule vs, fs;
+    VkPushConstantRange pr = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48 };
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    VkPipelineShaderStageCreateInfo st[2] = {
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO } };
+    VkPipelineVertexInputStateCreateInfo vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+    VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    VkPipelineMultisampleStateCreateInfo ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    VkPipelineColorBlendAttachmentState cb;
+    VkPipelineColorBlendStateCreateInfo cbs = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    static const VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+    VkPipelineDynamicStateCreateInfo dy = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    VkPipelineRenderingCreateInfoKHR rci = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR };
+    VkGraphicsPipelineCreateInfo pci = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+
+    if (s_ov_pso)
+        return 1;
+    vs = sw_module(s_ov_vs, shaderc_vertex_shader);
+    fs = sw_module(s_ov_fs, shaderc_fragment_shader);
+    if (!vs || !fs)
+        return 0;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pr;
+    if (!s_ov_layout && vkCreatePipelineLayout(s_dev, &pl, NULL, &s_ov_layout) != VK_SUCCESS)
+        return 0;
+    if (s_legacy && !s_ov_rp) {
+        VkAttachmentDescription a;
+        VkAttachmentReference r = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sp;
+        VkRenderPassCreateInfo rc = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        memset(&a, 0, sizeof a);
+        a.format = s_sw_fmt;
+        a.samples = VK_SAMPLE_COUNT_1_BIT;
+        a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        memset(&sp, 0, sizeof sp);
+        sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        sp.colorAttachmentCount = 1;
+        sp.pColorAttachments = &r;
+        rc.attachmentCount = 1;
+        rc.pAttachments = &a;
+        rc.subpassCount = 1;
+        rc.pSubpasses = &sp;
+        vkCreateRenderPass(s_dev, &rc, NULL, &s_ov_rp);
+    }
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    st[0].module = vs;
+    st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    st[1].module = fs;
+    st[1].pName = "main";
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    vp.viewportCount = vp.scissorCount = 1;
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.lineWidth = 1.0f;
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    memset(&cb, 0, sizeof cb);
+    cb.blendEnable = VK_TRUE;
+    cb.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    cb.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cb.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    cb.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    cb.colorWriteMask = 0xF;
+    cbs.attachmentCount = 1;
+    cbs.pAttachments = &cb;
+    dy.dynamicStateCount = 2;
+    dy.pDynamicStates = dyn;
+    rci.colorAttachmentCount = 1;
+    rci.pColorAttachmentFormats = &s_sw_fmt;
+    pci.stageCount = 2;
+    pci.pStages = st;
+    pci.pVertexInputState = &vi;
+    pci.pInputAssemblyState = &ia;
+    pci.pViewportState = &vp;
+    pci.pRasterizationState = &rs;
+    pci.pMultisampleState = &ms;
+    pci.pColorBlendState = &cbs;
+    pci.pDynamicState = &dy;
+    pci.layout = s_ov_layout;
+    if (s_legacy)
+        pci.renderPass = s_ov_rp;
+    else
+        pci.pNext = &rci;
+    if (vkCreateGraphicsPipelines(s_dev, s_pcache, 1, &pci, NULL, &s_ov_pso) != VK_SUCCESS)
+        s_ov_pso = VK_NULL_HANDLE;
+    vkDestroyShaderModule(s_dev, vs, NULL);
+    vkDestroyShaderModule(s_dev, fs, NULL);
+    return s_ov_pso != VK_NULL_HANDLE;
+}
+
+static int sw_create(void)
+{
+    VkSurfaceCapabilitiesKHR caps;
+    VkSurfaceFormatKHR fmts[32];
+    VkSwapchainCreateInfoKHR ci = { VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
+    VkSemaphoreCreateInfo si = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+    uint32_t nf = 32, i;
+    int w = 0, h = 0;
+
+    if (!s_surf)
+        return 0;
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s_pdev, s_surf, &caps) != VK_SUCCESS)
+        return 0;
+    if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT))
+        return 0;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(s_pdev, s_surf, &nf, fmts);
+    s_sw_fmt = VK_FORMAT_UNDEFINED;
+    for (i = 0; i < nf && !s_sw_fmt; i++)
+        if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM)
+            s_sw_fmt = fmts[i].format;
+    for (i = 0; i < nf && !s_sw_fmt; i++)
+        if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM)
+            s_sw_fmt = fmts[i].format;
+    if (!s_sw_fmt)
+        return 0;
+    s_sw_ext = caps.currentExtent;
+    if (s_sw_ext.width == 0xFFFFFFFFu) {
+        SDL_GetWindowSizeInPixels(s_win, &w, &h);
+        s_sw_ext.width = (uint32_t)w;
+        s_sw_ext.height = (uint32_t)h;
+    }
+    if (!s_sw_ext.width || !s_sw_ext.height)
+        return 0;
+    ci.surface = s_surf;
+    ci.minImageCount = caps.minImageCount < 3 ? 3 : caps.minImageCount;
+    if (caps.maxImageCount && ci.minImageCount > caps.maxImageCount)
+        ci.minImageCount = caps.maxImageCount;
+    ci.imageFormat = s_sw_fmt;
+    ci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    ci.imageExtent = s_sw_ext;
+    ci.imageArrayLayers = 1;
+    ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    /* Identity: the frame as drawn, and the compositor turns it to the
+     * screen. The surface's own transform (90 degrees on a phone held
+     * landscape) would say it was already turned, and it was not. */
+    ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+                      ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
+    ci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
+                        ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
+                        : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    ci.clipped = VK_TRUE;
+    if (vkCreateSwapchainKHR(s_dev, &ci, NULL, &s_swap) != VK_SUCCESS) {
+        s_swap = VK_NULL_HANDLE;
+        return 0;
+    }
+    s_sw_n = 8;
+    vkGetSwapchainImagesKHR(s_dev, s_swap, &s_sw_n, s_sw_img);
+    for (i = 0; i < s_sw_n; i++) {
+        VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vi.image = s_sw_img[i];
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = s_sw_fmt;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.layerCount = 1;
+        vkCreateImageView(s_dev, &vi, NULL, &s_sw_view[i]);
+        if (!s_sw_done[i])
+            vkCreateSemaphore(s_dev, &si, NULL, &s_sw_done[i]);
+    }
+    for (i = 0; i < SLOTS; i++)
+        if (!s_sw_acq[i])
+            vkCreateSemaphore(s_dev, &si, NULL, &s_sw_acq[i]);
+    if (ov_init() && s_legacy)
+        for (i = 0; i < s_sw_n; i++) {
+            VkFramebufferCreateInfo fi = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            fi.renderPass = s_ov_rp;
+            fi.attachmentCount = 1;
+            fi.pAttachments = &s_sw_view[i];
+            fi.width = s_sw_ext.width;
+            fi.height = s_sw_ext.height;
+            fi.layers = 1;
+            vkCreateFramebuffer(s_dev, &fi, NULL, &s_sw_fb[i]);
+        }
+    fprintf(stderr, LOGP "swapchain %ux%u, %u images, format %d, transform 0x%X\n",
+            s_sw_ext.width, s_sw_ext.height, s_sw_n, (int)s_sw_fmt,
+            (unsigned)caps.currentTransform);
+    return 1;
+}
+
+static void sw_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, VkImageLayout to)
+{
+    VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    b.oldLayout = from;
+    b.newLayout = to;
+    b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
+/* rt's frame (hcw x hch host pixels) to the screen. 1 if presented. */
+static int sw_present(RenderTarget *rt, uint32_t hcw, uint32_t hch)
+{
+    VkCommandBuffer cb;
+    VkSemaphore acq;
+    uint32_t idx = 0;
+    VkResult r;
+    VkClearColorValue black = { { 0, 0, 0, 1 } };
+    VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    VkImageBlit bl;
+    float sx, sy, sc;
+    VkTouchShape sh[32];
+    int nsh, i;
+    VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+
+    if (!rt || !hcw || !hch || !s_have_swapchain)
+        return 0;
+    if (!s_surf) {
+        /* the window was not ready at init (or was taken away): try again
+         * every 10 flips */
+        VkBool32 ok = VK_FALSE;
+        if (s_sw_retry && s_presents < s_sw_retry)
+            return 0;
+        s_sw_retry = s_presents + 10;
+        if (!SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf)) {
+            s_surf = VK_NULL_HANDLE;
+            return 0;
+        }
+        vkGetPhysicalDeviceSurfaceSupportKHR(s_pdev, s_qfam, s_surf, &ok);
+        if (!ok) {
+            vkDestroySurfaceKHR(s_inst, s_surf, NULL);
+            s_surf = VK_NULL_HANDLE;
+            s_have_swapchain = 0;
+            fprintf(stderr, LOGP "the queue cannot present to the window: readback\n");
+            return 0;
+        }
+        fprintf(stderr, LOGP "window surface made at flip %llu\n",
+                (unsigned long long)s_presents);
+        s_sw_retry = 0;
+    }
+    if (!s_swap) {
+        if (s_sw_retry && s_presents < s_sw_retry)
+            return 0;
+        if (!sw_create()) {
+            s_sw_retry = s_presents + 60;
+            return 0;
+        }
+    }
+    end_encoder();
+    ensure_cmd();
+    acq = s_sw_acq[s_cur - s_slot];
+    nv2a_vk_queue_lock();
+    r = vkAcquireNextImageKHR(s_dev, s_swap, 100000000ull, acq, VK_NULL_HANDLE, &idx);
+    nv2a_vk_queue_unlock();
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+        /* out of date, the surface gone (paused), or a timeout */
+        if (r != VK_TIMEOUT && r != VK_NOT_READY) {
+            sw_destroy();
+            if (r == VK_ERROR_SURFACE_LOST_KHR) {
+                vkDestroySurfaceKHR(s_inst, s_surf, NULL);
+                if (!SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf))
+                    s_surf = VK_NULL_HANDLE;
+            }
+            s_sw_retry = s_presents + 10;
+        }
+        return 0;
+    }
+    cb = s_cur->cmd;
+    barrier_all(cb);
+    sw_barrier(cb, s_sw_img[idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    vkCmdClearColorImage(cb, s_sw_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &rr);
+    /* letterboxed: the frame's shape, as large as the screen takes */
+    sx = (float)s_sw_ext.width / (float)hcw;
+    sy = (float)s_sw_ext.height / (float)hch;
+    sc = sx < sy ? sx : sy;
+    memset(&bl, 0, sizeof bl);
+    bl.srcSubresource.aspectMask = bl.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bl.srcSubresource.layerCount = bl.dstSubresource.layerCount = 1;
+    bl.srcOffsets[1].x = (int32_t)hcw;
+    bl.srcOffsets[1].y = (int32_t)hch;
+    bl.srcOffsets[1].z = 1;
+    bl.dstOffsets[0].x = (int32_t)(((float)s_sw_ext.width - hcw * sc) * 0.5f);
+    bl.dstOffsets[0].y = (int32_t)(((float)s_sw_ext.height - hch * sc) * 0.5f);
+    bl.dstOffsets[1].x = bl.dstOffsets[0].x + (int32_t)(hcw * sc);
+    bl.dstOffsets[1].y = bl.dstOffsets[0].y + (int32_t)(hch * sc);
+    bl.dstOffsets[1].z = 1;
+    vkCmdBlitImage(cb, rt->tex.img, VK_IMAGE_LAYOUT_GENERAL, s_sw_img[idx],
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+    sw_barrier(cb, s_sw_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    nsh = touch_pad_shapes(sh, 32, (int)s_sw_ext.width, (int)s_sw_ext.height);
+    if (nsh && s_ov_pso) {
+        VkViewport vp = { 0, 0, (float)s_sw_ext.width, (float)s_sw_ext.height, 0, 1 };
+        VkRect2D sci = { { 0, 0 }, s_sw_ext };
+        if (s_legacy) {
+            VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            bi.renderPass = s_ov_rp;
+            bi.framebuffer = s_sw_fb[idx];
+            bi.renderArea = sci;
+            vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+        } else {
+            VkRenderingAttachmentInfoKHR ca = { VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR };
+            VkRenderingInfoKHR ri = { VK_STRUCTURE_TYPE_RENDERING_INFO_KHR };
+            ca.imageView = s_sw_view[idx];
+            ca.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ca.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            ri.renderArea = sci;
+            ri.layerCount = 1;
+            ri.colorAttachmentCount = 1;
+            ri.pColorAttachments = &ca;
+            s_begin_rendering(cb, &ri);
+        }
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, s_ov_pso);
+        vkCmdSetViewport(cb, 0, 1, &vp);
+        vkCmdSetScissor(cb, 0, 1, &sci);
+        for (i = 0; i < nsh; i++) {
+            float pc[12] = { sh[i].x, sh[i].y, sh[i].r, sh[i].fill ? 1.0f : 0.0f,
+                             sh[i].c[0], sh[i].c[1], sh[i].c[2], sh[i].c[3],
+                             (float)s_sw_ext.width, (float)s_sw_ext.height, 0, 0 };
+            vkCmdPushConstants(cb, s_ov_layout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof pc, pc);
+            vkCmdDraw(cb, 6, 1, 0, 0);
+        }
+        if (s_legacy)
+            vkCmdEndRenderPass(cb);
+        else
+            s_end_rendering(cb);
+    }
+    sw_barrier(cb, s_sw_img[idx], VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+    s_sub_wait = acq;
+    s_sub_signal = s_sw_done[idx];
+    flush(0);
+    s_sub_wait = s_sub_signal = VK_NULL_HANDLE;
+    pi.waitSemaphoreCount = 1;
+    pi.pWaitSemaphores = &s_sw_done[idx];
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &s_swap;
+    pi.pImageIndices = &idx;
+    nv2a_vk_queue_lock();
+    r = vkQueuePresentKHR(s_queue, &pi);
+    nv2a_vk_queue_unlock();
+    if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR) {
+        sw_destroy();
+        s_sw_retry = s_presents + 10;
+    }
+    s_sw_presents++;
+    return 1;
+}
+
 static void vk_flip(uint32_t surface_offset, uint32_t pitch)
 {
     RenderTarget *rt = NULL;
@@ -3399,6 +3931,19 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
         }
         win = rt && (xbox_FramebufferWindowRunning() || host_dump_due());
         wb = rt && addr && pitch && pitch >= rt->w * 2u && always;
+        /* The window's swapchain: the frame goes from the GPU to the screen,
+         * and the flip waits for nothing (no readback, no flush(1)). */
+        if (rt && s_have_swapchain && !wb && !host_dump_due() && sw_present(rt, hcw, hch)) {
+            occ_settle(1);
+            s_presents++;
+            if (s_presents == 1 || (s_presents % 300) == 0)
+                fprintf(stderr, LOGP "present #%llu: swapchain (%llu window presents),"
+                        " %llu draws, %llu texture uploads, %llu flushes\n",
+                        (unsigned long long)s_presents, (unsigned long long)s_sw_presents,
+                        (unsigned long long)s_draws, (unsigned long long)s_tex_uploads,
+                        (unsigned long long)s_flushes);
+            return;
+        }
         /* One readback of the whole target serves the window and the
          * write-back; it waits for the frame. */
         if (rt && (win || wb))
