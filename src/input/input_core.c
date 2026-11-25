@@ -459,6 +459,13 @@ static DWORD filtered(DWORD port, DWORD rc, XBOX_INPUT_STATE *st,
 #define FILTER(port, rc, st) (rc)
 #endif
 
+static xbox_input_ext_pad_fn g_ext_pad;
+
+void xbox_InputSetExtPad(xbox_input_ext_pad_fn fn)
+{
+    __atomic_store_n(&g_ext_pad, fn, __ATOMIC_RELEASE);
+}
+
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 {
     XBOX_INPUT_STATE kb;
@@ -487,6 +494,21 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         }
     }
 #endif
+
+    /* An external pad (a VR runtime's controllers) answers for port 0 as
+     * the keyboard does below: alone, or merged over a host pad. */
+    if (dwPort == 0) {
+        xbox_input_ext_pad_fn ext = __atomic_load_n(&g_ext_pad, __ATOMIC_ACQUIRE);
+        XBOX_INPUT_STATE xs;
+        if (ext && ext(&xs)) {
+            if (rc != ERROR_SUCCESS) {
+                *pState = xs;
+                rc = ERROR_SUCCESS;
+            } else {
+                xbox_InputMergeKbm(pState, &xs);
+            }
+        }
+    }
 
     /* The keyboard answers for port 0 with or without a pad there, and is
      * merged on top of one: a real pad keeps working, the keys only add. */

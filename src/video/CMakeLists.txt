@@ -46,3 +46,14 @@ if(WIN32)
     target_link_libraries(xbox_video PUBLIC mfplat mfreadwrite mfuuid mf ole32
                           d3d11 dxgi dxguid d3dcompiler)
 endif()
+
+# Immersive VR on an OpenXR runtime (Meta Quest): src/xr/xr_openxr.c, on
+# Android with the Vulkan backend. OPENXR_INCLUDE_DIRS and OPENXR_LIB name
+# the Khronos SDK's headers and the Android loader.
+if(XBOXRECOMP_OPENXR AND ANDROID)
+    target_sources(xbox_video PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../xr/xr_openxr.c)
+    target_compile_definitions(xbox_video PUBLIC XBR_HAVE_OPENXR)
+    target_include_directories(xbox_video PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../xr
+                               PRIVATE ${OPENXR_INCLUDE_DIRS})
+    target_link_libraries(xbox_video PUBLIC ${OPENXR_LIB} xbox_d3d8)
+endif()

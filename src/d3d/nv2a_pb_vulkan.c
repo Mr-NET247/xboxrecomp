@@ -52,6 +52,8 @@
 #include "nv2a_tex_dump.h"
 #include "d3d8_glsl.h"
 #include "nv2a_basic_glsl.h"
+#include "nv2a_vk_xr.h"
+#include <pthread.h>
 
 ptrdiff_t xbox_GetMemoryOffset(void);
 extern void xbox_FramebufferWindowSet(uint32_t fb_va, uint32_t pitch);
@@ -103,6 +105,16 @@ static PFN_vkCmdPushDescriptorSetKHR s_push_desc;   /* NULL: sets from slot pool
 static PFN_vkCmdBeginRenderingKHR    s_begin_rendering;
 static PFN_vkCmdEndRenderingKHR      s_end_rendering;
 static int                           s_legacy;   /* no dynamic rendering: VkRenderPass */
+
+/* ---- a VR runtime's share (nv2a_vk_xr.h) ---------------------------------------- */
+static const struct nv2a_vk_xr *s_xr;
+static pthread_mutex_t s_qlock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t s_flock = PTHREAD_MUTEX_INITIALIZER;
+void nv2a_pb_vulkan_set_xr(const struct nv2a_vk_xr *xr) { s_xr = xr; }
+void nv2a_vk_queue_lock(void)   { pthread_mutex_lock(&s_qlock); }
+void nv2a_vk_queue_unlock(void) { pthread_mutex_unlock(&s_qlock); }
+void nv2a_vk_frame_lock(void)   { pthread_mutex_lock(&s_flock); }
+void nv2a_vk_frame_unlock(void) { pthread_mutex_unlock(&s_flock); }
 static shaderc_compiler_t            s_cc;
 static shaderc_compile_options_t     s_copt;
 static VkShaderModule    s_vs_pass, s_fs_basic;
@@ -419,7 +431,9 @@ static void flush(int wait)
         cbs[n++] = s_cur->cmd;
         si.commandBufferCount = n;
         si.pCommandBuffers = cbs;
+        nv2a_vk_queue_lock();
         VKC(vkQueueSubmit(s_queue, 1, &si, s_cur->fence), "vkQueueSubmit");
+        nv2a_vk_queue_unlock();
         s_cur->busy = 1;
         s_last = s_cur->serial;
         s_cur = NULL;
@@ -538,7 +552,8 @@ static int init_device(void)
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = niext;
     ici.ppEnabledExtensionNames = iext;
-    if (vkCreateInstance(&ici, NULL, &s_inst) != VK_SUCCESS) {
+    if ((s_xr ? s_xr->create_instance(&ici, &s_inst) : vkCreateInstance(&ici, NULL, &s_inst))
+            != VK_SUCCESS) {
         fprintf(stderr, LOGP "no Vulkan instance\n");
         return 0;
     }
@@ -547,12 +562,13 @@ static int init_device(void)
         fprintf(stderr, LOGP "no Vulkan device\n");
         return 0;
     }
-    /* A discrete GPU first, else the first device. */
-    s_pdev = pd[0];
+    /* A discrete GPU first, else the first device; the VR runtime's own
+     * choice when there is one. */
+    s_pdev = s_xr ? s_xr->physical_device(s_inst) : pd[0];
     for (i = 0; i < n; i++) {
         VkPhysicalDeviceProperties p;
         vkGetPhysicalDeviceProperties(pd[i], &p);
-        if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        if (!s_xr && p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
             s_pdev = pd[i];
             break;
         }
@@ -612,7 +628,8 @@ static int init_device(void)
     dci.enabledExtensionCount = ndext;
     dci.ppEnabledExtensionNames = dext;
     dci.pEnabledFeatures = &want;
-    if (vkCreateDevice(s_pdev, &dci, NULL, &s_dev) != VK_SUCCESS) {
+    if ((s_xr ? s_xr->create_device(s_pdev, &dci, &s_dev)
+              : vkCreateDevice(s_pdev, &dci, NULL, &s_dev)) != VK_SUCCESS) {
         fprintf(stderr, LOGP "%s: vkCreateDevice failed\n", s_props.deviceName);
         return 0;
     }
@@ -759,6 +776,8 @@ static int init(void)
             s_precise_occ, s_push_desc != NULL,
             s_legacy ? "render pass objects" : "dynamic rendering");
     s_failed = 0;
+    if (s_xr)
+        s_xr->device_ready(s_inst, s_pdev, s_dev, s_qfam, s_queue);
     return 1;
 }
 
@@ -3329,6 +3348,44 @@ static void occ_after_wait(void)
 static uint32_t s_shown_w, s_shown_h;
 static uint64_t s_window_presents;
 
+/* The VR runtime's copy of the latest frame (nv2a_vk_frame). */
+static Img      s_xr_img;
+static uint64_t s_xr_gen;
+
+int nv2a_vk_frame(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen)
+{
+    if (!s_xr_img.img || !s_xr_gen)
+        return 0;
+    *img = s_xr_img.img;
+    *w = s_xr_img.w;
+    *h = s_xr_img.h;
+    *gen = s_xr_gen;
+    return 1;
+}
+
+/* At the flip, before its wait: the frame's host pixels into s_xr_img. */
+static void xr_frame_copy(RenderTarget *rt, uint32_t w, uint32_t h)
+{
+    if (!s_xr || !rt || !w || !h)
+        return;
+    nv2a_vk_frame_lock();
+    if (!s_xr_img.img || s_xr_img.w != w || s_xr_img.h != h) {
+        if (s_xr_img.img) {
+            /* the runtime may be reading it: let the queue drain */
+            nv2a_vk_queue_lock();
+            vkQueueWaitIdle(s_queue);
+            nv2a_vk_queue_unlock();
+            img_destroy_now(&s_xr_img);
+        }
+        if (!rt_image_new(&s_xr_img, w, h)) {
+            nv2a_vk_frame_unlock();
+            return;
+        }
+    }
+    copy_image(&rt->tex, 0, 0, &s_xr_img, 0, 0, w, h);
+    nv2a_vk_frame_unlock();
+}
+
 /* RECOMP_DEBUG=metal_host_dump=<prefix>: the frame as presented, host
  * size, every fb_dump_flips flip (20), <prefix>host_NNNNN.bmp, as the Metal
  * backend's host_dump. */
@@ -3393,6 +3450,8 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
             s_shown_w = cw;
             s_shown_h = ch;
         }
+        if (rt)
+            xr_frame_copy(rt, hcw, hch);
         win = rt && (xbox_FramebufferWindowRunning() || host_dump_due());
         wb = rt && addr && pitch && pitch >= rt->w * 2u && always;
         /* One readback of the whole target serves the window and the
@@ -3402,6 +3461,8 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
         else
             flush(1);
         occ_settle(1);
+        if (s_xr && rt && s_xr_img.img)
+            __atomic_store_n(&s_xr_gen, s_xr_gen + 1, __ATOMIC_RELEASE);
         if (px && host_dump_due())
             host_dump(px, rt->hw * 4u, hcw, hch);
         if (wb && px) {

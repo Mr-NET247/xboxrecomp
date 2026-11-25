@@ -55,6 +55,7 @@ add_subdirectory(src/platform)
 # or the NDK's on Android). The define goes to every target: the executor
 # registers the backend (nv2a_pb_exec.c).
 option(XBOXRECOMP_VULKAN "Build the Vulkan pushbuffer backend" OFF)
+option(XBOXRECOMP_OPENXR "Immersive VR on OpenXR (Android, with the Vulkan backend)" OFF)
 if(XBOXRECOMP_VULKAN)
     add_compile_definitions(XBR_HAVE_VULKAN)
 endif()
