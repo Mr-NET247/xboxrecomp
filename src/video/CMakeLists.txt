@@ -14,7 +14,7 @@ if(WIN32)
     target_link_libraries(xbox_video PUBLIC xbox_input)
 else()
     find_package(SDL3 3.2 CONFIG REQUIRED)
-    target_sources(xbox_video PRIVATE fb_present_sdl.c)
+    target_sources(xbox_video PRIVATE fb_present_sdl.c touch_pad.c)
     target_link_libraries(xbox_video PUBLIC SDL3::SDL3 xbox_input)
     if(APPLE)
         # The window's CAMetalLayer present for the Metal backend (manual
