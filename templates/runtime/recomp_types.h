@@ -165,7 +165,7 @@ extern uint32_t g_xbox_code_hi;
 #  define RECOMP_TLS _Thread_local
 #endif
 
-#include "recomp_tls_regs.h"   /* g_regs: g_eax ... g_fp_stack */
+#include "recomp_tls_regs.h"   /* g_dregs and the rest: g_eax ... g_fp_stack */
 
 
 /* x87 stack. Per-thread for the same reason the integer registers are:

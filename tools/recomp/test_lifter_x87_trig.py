@@ -64,6 +64,7 @@ _SOURCE = r"""
 #define RECOMP_GENERATED_CODE 1
 #include "recomp_types.h"
 #include <stdio.h>
+RECOMP_TLS RecompTlsDRegs g_dregs;   /* g_eax ... g_edi (recomp_tls_regs.h) */
 RECOMP_TLS uint32_t g_seh_ebp, g_eflags;
 RECOMP_TLS double g_fp_stack[8]; RECOMP_TLS int g_fp_top;
 RECOMP_TLS uint16_t g_fp_control_word = 0x027F; RECOMP_TLS int g_fp_cmp;
@@ -72,7 +73,7 @@ RECOMP_TLS uint16_t g_fp_cc;
 static int taken;
 static void sub_00000040(void) { taken = 1; }
 static void crt_sin(void) {
-    uint32_t eax = 0, ebp = 0; uint32_t _fa = 0, _fb = 0; (void)ebp; (void)_fa; (void)_fb;
+    uint32_t ebp = 0; eax = 0; uint32_t _fa = 0, _fb = 0; (void)ebp; (void)_fa; (void)_fb;
 @SIN@
 }
 static void op_sincos(void) {

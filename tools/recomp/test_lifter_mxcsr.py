@@ -58,9 +58,13 @@ class MxcsrLiftTest(unittest.TestCase):
         runtime_types = (_ROOT / "templates" / "runtime" / "recomp_types.h").read_text(encoding="utf-8")
         main = (_ROOT / "templates" / "new-game" / "src" / "main.c").read_text(encoding="utf-8")
         layout = (_ROOT / "src" / "kernel" / "xbox_memory_layout.c").read_text(encoding="utf-8")
-        self.assertIn("extern RECOMP_TLS uint32_t g_mxcsr;", runtime_types)
-        self.assertIn("extern RECOMP_TLS uint32_t g_mxcsr;", main)
-        self.assertIn("RECOMP_TLS uint32_t g_mxcsr = 0x1F80u;", layout)
+        # Declared once in recomp_tls_regs.h (which recomp_types.h
+        # includes); the game template takes it from there.
+        tls_regs = (_ROOT / "templates" / "runtime" / "recomp_tls_regs.h").read_text(encoding="utf-8")
+        self.assertIn('#include "recomp_tls_regs.h"', runtime_types)
+        self.assertRegex(tls_regs, r"extern RECOMP_TLS uint32_t [^;]*\bg_mxcsr\b")
+        self.assertNotIn("extern RECOMP_TLS uint32_t g_mxcsr", main)
+        self.assertRegex(layout, r"RECOMP_TLS uint32_t [^;]*\bg_mxcsr = 0x1F80u")
 
 
 class SseConversionLiftTest(unittest.TestCase):

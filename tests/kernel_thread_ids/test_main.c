@@ -29,7 +29,7 @@
 
 typedef void (*recomp_func_t)(void);
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
-extern RECOMP_TLS uint32_t g_eax, g_esp;
+extern RECOMP_TLS uint32_t g_esp;
 
 #define ETHREAD_UNIQUE_THREAD 0x12Cu
 

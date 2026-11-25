@@ -58,9 +58,15 @@ class RuntimeHelpersDefinedTest(unittest.TestCase):
         for i in range(8):
             self.assertIn(f"#define xmm{i} g_xmm{i}", runtime)
         self.assertIn("typedef union RecompXmm", runtime)
-        main_c = (_ROOT / "templates" / "new-game" / "src" / "main.c").read_text(
+        # The storage is one thread-local block, g_vregs (recomp_tls_regs.h),
+        # with g_xmm0..7 naming its fields; xbox_memory_layout.c defines it.
+        tls_regs = (_RUNTIME.parent / "recomp_tls_regs.h").read_text(encoding="utf-8")
+        self.assertIn("RecompXmm r_xmm[8]", tls_regs)
+        for i in range(8):
+            self.assertIn(f"#define g_xmm{i} (g_vregs.r_xmm[{i}])", tls_regs)
+        layout = (_ROOT / "src" / "kernel" / "xbox_memory_layout.c").read_text(
             encoding="utf-8")
-        self.assertIn("RecompXmm g_xmm0", main_c)
+        self.assertIn("RECOMP_TLS RecompTlsVRegs g_vregs;", layout)
 
 
 if __name__ == "__main__":

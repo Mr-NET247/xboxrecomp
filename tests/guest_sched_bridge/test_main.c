@@ -28,7 +28,7 @@ recomp_func_t recomp_lookup(uint32_t va)
 recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
 
 extern recomp_func_t recomp_lookup_kernel(uint32_t xbox_va);
-extern RECOMP_TLS uint32_t g_eax, g_esp;
+extern RECOMP_TLS uint32_t g_esp;
 extern ptrdiff_t g_xbox_mem_offset;
 
 #define G32(va) (*(volatile uint32_t *)((uintptr_t)(va) + g_xbox_mem_offset))

@@ -431,7 +431,8 @@ static void test_token_live(void)
 /* ---- 2. the hook slots (5.4) ------------------------------------------ */
 
 /* The guest registers, as xbox_memory_layout.c defines them. */
-RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
+RECOMP_TLS RecompTlsDRegs g_dregs;   /* g_eax ... g_edi */
+RECOMP_TLS uint32_t g_esp;
 RECOMP_TLS double g_fp_stack[8];
 RECOMP_TLS int g_fp_top;
 

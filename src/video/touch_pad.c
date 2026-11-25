@@ -12,12 +12,19 @@
  * Each finger keeps the control it went down on until it lifts. The pad
  * reaches the game as the external pad on port 0 (xbox_InputSetExtPad),
  * merged with any controller.
+ *
+ * On by default (iOS, Android), the controls hide while a gamepad or a
+ * hardware keyboard is there. iOS reports keyboards (GCKeyboard); Android's
+ * SDL does not, so there the first key press from a keyboard stands for one.
+ * A touch while they are hidden brings them back, until the next gamepad or
+ * key press or a device connecting. RECOMP_TOUCH=1 shows them always.
  */
 #include "touch_pad.h"
 #include "host_pad.h"
 #include "xinput_xbox.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +48,96 @@ static const Ctl s_ctl[C_N] = {
 #define FINGERS 10
 static struct { SDL_FingerID id; int ctl; float ox, oy, x, y; } s_f[FINGERS];
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
-static int s_on;
+static int s_on;        /* the controls exist at all */
+static int s_auto;      /* they hide for a gamepad or a keyboard */
+static int s_key_seen;  /* a keyboard key was pressed (Android: no keyboard list) */
+/* Read on the Vulkan presenter's thread too (touch_pad_shapes). */
+static int s_dev_off;   /* a gamepad or keyboard is there */
+static int s_touch_back;/* shown again by a touch, over s_dev_off */
+
+static int shown(void)
+{
+    return s_on && (!__atomic_load_n(&s_dev_off, __ATOMIC_ACQUIRE)
+                    || __atomic_load_n(&s_touch_back, __ATOMIC_ACQUIRE));
+}
+
+/* Applies a new device state or touch override; nonzero when the controls
+ * appeared or went. Fingers are let go when they hide, so nothing sticks. */
+static int set_state(int dev_off, int touch_back, const char *why)
+{
+    int before = shown(), after;
+    __atomic_store_n(&s_dev_off, dev_off, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_touch_back, touch_back, __ATOMIC_RELEASE);
+    after = shown();
+    if (before == after)
+        return 0;
+    if (!after) {
+        pthread_mutex_lock(&s_lock);
+        memset(s_f, 0, sizeof s_f);
+        pthread_mutex_unlock(&s_lock);
+    }
+    fprintf(stderr, "[TOUCH] on-screen controls %s (%s)\n", after ? "shown" : "hidden", why);
+    return 1;
+}
+
+static int devices_present(void)
+{
+    return SDL_HasGamepad() || SDL_HasKeyboard() || s_key_seen;
+}
+
+/* Keys a phone or tablet sends by itself: not a keyboard. */
+static int system_key(SDL_Scancode sc)
+{
+    switch (sc) {
+    case SDL_SCANCODE_AC_BACK: case SDL_SCANCODE_AC_HOME: case SDL_SCANCODE_MENU:
+    case SDL_SCANCODE_VOLUMEUP: case SDL_SCANCODE_VOLUMEDOWN: case SDL_SCANCODE_MUTE:
+    case SDL_SCANCODE_POWER: case SDL_SCANCODE_SLEEP: case SDL_SCANCODE_WAKE:
+    case SDL_SCANCODE_MEDIA_PLAY: case SDL_SCANCODE_MEDIA_PAUSE:
+    case SDL_SCANCODE_MEDIA_PLAY_PAUSE: case SDL_SCANCODE_MEDIA_NEXT_TRACK:
+    case SDL_SCANCODE_MEDIA_PREVIOUS_TRACK: case SDL_SCANCODE_MEDIA_STOP:
+    case SDL_SCANCODE_UNKNOWN:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Device and input events that show or hide the controls. */
+static int device_event(const SDL_Event *ev)
+{
+    if (!s_on || !s_auto)
+        return 0;
+    switch (ev->type) {
+    case SDL_EVENT_GAMEPAD_ADDED:
+    case SDL_EVENT_KEYBOARD_ADDED:
+        return set_state(1, 0, ev->type == SDL_EVENT_GAMEPAD_ADDED
+                         ? "gamepad connected" : "keyboard connected");
+    case SDL_EVENT_KEYBOARD_REMOVED:
+        s_key_seen = 0;
+        /* fall through */
+    case SDL_EVENT_GAMEPAD_REMOVED:
+        return set_state(devices_present(), __atomic_load_n(&s_touch_back, __ATOMIC_ACQUIRE),
+                         ev->type == SDL_EVENT_GAMEPAD_REMOVED
+                         ? "gamepad disconnected" : "keyboard disconnected");
+    case SDL_EVENT_KEY_DOWN:
+        if (ev->key.repeat || system_key(ev->key.scancode))
+            return 0;
+        s_key_seen = 1;
+        return set_state(1, 0, "key pressed");
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+        return set_state(1, 0, "gamepad button");
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if (ev->gaxis.value > 16000 || ev->gaxis.value < -16000)
+            return set_state(1, 0, "gamepad stick");
+        return 0;
+    case SDL_EVENT_FINGER_DOWN:
+        if (!shown())
+            return set_state(__atomic_load_n(&s_dev_off, __ATOMIC_ACQUIRE), 1, "touch");
+        return 0;
+    default:
+        return 0;
+    }
+}
 
 static int touch_ext_pad(XBOX_INPUT_STATE *st)
 {
@@ -84,11 +180,19 @@ int touch_pad_init(void)
     const char *e = getenv("RECOMP_TOUCH");
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
     s_on = !(e && e[0] == '0');
+    s_auto = !(e && e[0] == '1');
 #else
     s_on = e && e[0] == '1';
+    s_auto = 0;
 #endif
     if (s_on)
         xbox_InputSetExtPad(touch_ext_pad);
+    if (s_on && s_auto) {
+        int pads = SDL_HasGamepad(), keys = SDL_HasKeyboard();
+        __atomic_store_n(&s_dev_off, pads || keys, __ATOMIC_RELEASE);
+        fprintf(stderr, "[TOUCH] on-screen controls %s (gamepad %s, keyboard %s)\n",
+                (pads || keys) ? "hidden" : "shown", pads ? "yes" : "no", keys ? "yes" : "no");
+    }
     return s_on;
 }
 
@@ -108,9 +212,9 @@ static int hit(float x, float y, int w, int h)
 
 int touch_pad_event(const SDL_Event *ev, int w, int h)
 {
-    int i, changed = 0;
-    if (!s_on || w <= 0 || h <= 0)
-        return 0;
+    int i, changed = device_event(ev);
+    if (!shown() || w <= 0 || h <= 0)
+        return changed;
     if (ev->type != SDL_EVENT_FINGER_DOWN && ev->type != SDL_EVENT_FINGER_UP
             && ev->type != SDL_EVENT_FINGER_MOTION && ev->type != SDL_EVENT_FINGER_CANCELED)
         return 0;
@@ -187,7 +291,7 @@ void touch_pad_draw(SDL_Renderer *ren, int w, int h)
     int down[C_N] = { 0 }, i;
     float stick[4] = { 0 };
     int have_stick = 0;
-    if (!s_on || w <= 0 || h <= 0)
+    if (!shown() || w <= 0 || h <= 0)
         return;
     pthread_mutex_lock(&s_lock);
     for (i = 0; i < FINGERS; i++) {
@@ -252,7 +356,7 @@ int touch_pad_shapes(TouchShape *out, int max, int w, int h)
     int down[C_N] = { 0 }, c, i, n = 0;
     float st[4] = { 0 };
     int have = 0;
-    if (!s_on || w <= 0 || h <= 0)
+    if (!shown() || w <= 0 || h <= 0)
         return 0;
     pthread_mutex_lock(&s_lock);
     for (i = 0; i < FINGERS; i++) {

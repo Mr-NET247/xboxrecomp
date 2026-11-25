@@ -760,8 +760,6 @@ static void usb_pass(void)
 }
 
 /* D24: the back-edge idle test, then a ring with a compute loop in it. */
-extern RECOMP_TLS uint32_t g_esi;
-
 static void edge_idle(void)
 {
     XboxDetEdge e;
