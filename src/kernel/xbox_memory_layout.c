@@ -2840,7 +2840,16 @@ uint32_t g_xbox_code_hi = 0;
 /* Global registers for recompiled code (via recomp_types.h) */
 /* Each guest thread's TIB. The first thread uses the one the loader built;
  * a spawned thread gets its own from xbox_AllocThreadTib(). */
-RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
+/* The register set, per thread (recomp_tls_regs.h): every name below
+ * (g_eax, g_fs_base, g_mm0, ...) is a field of one of these. The initial
+ * values are the ones each register had as its own variable. */
+RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
+RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN, g_seh_ebp, g_eflags = 0x00000202u,
+                    g_mxcsr = 0x1F80u;
+RECOMP_TLS int g_df, g_fp_top, g_fp_cmp;
+RECOMP_TLS uint16_t g_fp_control_word = 0x037Fu, g_fp_cc = 0x4000;
+RECOMP_TLS double g_fp_stack[8];
+RECOMP_TLS RecompTlsVRegs g_vregs;
 
 /* The shape of the TLS block the loader built, so a new thread can be
  * given one just like it: where the initialised image data starts, how
@@ -2848,8 +2857,8 @@ RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN;
  * at is. Zero total means the image had no TLS directory. */
 static uint32_t g_tls_template_va, g_tls_total, g_tls_thread_size = 64;
 
-RECOMP_TLS uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
-RECOMP_TLS uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
+/* (g_eax: g_regs/g_vregs) */
+/* (g_ebx: g_regs/g_vregs) */
 
 #ifdef RECOMP_ABI_CHECK
 /* Report a lifted function that returned without restoring ebx/esi/edi.
@@ -2948,9 +2957,9 @@ void recomp_abi_violation_log(uint32_t va, uint32_t ebx0, uint32_t esi0,
 #endif
 
 /* SEH frame pointer bridge (see recomp_types.h for explanation) */
-RECOMP_TLS uint32_t g_seh_ebp = 0;
-RECOMP_TLS double g_fp_stack[8];
-RECOMP_TLS int g_fp_top = 0;
+/* (g_seh_ebp: g_regs/g_vregs) */
+/* (g_fp_stack[8]: g_regs/g_vregs) */
+/* (g_fp_top: g_regs/g_vregs) */
 
 /* Set once at startup. The generated code reads it at the ret of every
  * --force-return function, so it has to be cheap and it has to default to
@@ -2959,14 +2968,12 @@ RECOMP_TLS int g_fp_top = 0;
 int g_force_return = 0;
 /* x87 control and status. The reset default masks every exception and
  * rounds to nearest, which is what the CRT expects before _control87. */
-RECOMP_TLS uint16_t g_fp_control_word = 0x037Fu;
-RECOMP_TLS uint32_t g_mxcsr = 0x1F80u;
-RECOMP_TLS int g_fp_cmp = 0;
-RECOMP_TLS uint16_t g_fp_cc = 0x4000;
+/* (g_fp_control_word: g_regs/g_vregs) */
+/* (g_mxcsr: g_regs/g_vregs) */
+/* (g_fp_cmp: g_regs/g_vregs) */
+/* (g_fp_cc: g_regs/g_vregs) */
 
 /* Defined below, with the other guest registers. */
-extern RECOMP_TLS uint32_t g_ebp;
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_ebx, g_esi, g_edi;
 
 /* ---- non-local jumps ---------------------------------------------------
  *
@@ -3799,13 +3806,13 @@ void xbox_WatchdogStart(void)
 }
 
 /* SSE. 128 bits of architectural state, per-thread like the rest. */
-RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
-RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
-RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
-RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
+/* (g_mm0, g_mm1, g_mm2, g_mm3: g_regs/g_vregs) */
+/* (g_mm4, g_mm5, g_mm6, g_mm7: g_regs/g_vregs) */
+/* (g_xmm0, g_xmm1, g_xmm2, g_xmm3: g_regs/g_vregs) */
+/* (g_xmm4, g_xmm5, g_xmm6, g_xmm7: g_regs/g_vregs) */
 /* Last frame established by `mov ebp, esp`. Read by frameless functions
  * that address their caller's frame through ebp. */
-RECOMP_TLS uint32_t g_ebp = 0;
+/* (g_ebp: g_regs/g_vregs) */
 
 /* EFLAGS.DF. Zero means the string instructions walk forwards, which is the
  * ABI's resting state and what almost every one of them does -- so this is
@@ -3814,10 +3821,10 @@ RECOMP_TLS uint32_t g_ebp = 0;
  * `std; repne scasb`, and memmove goes backwards when its regions overlap the
  * wrong way. Thread-local, because `std` and the `cld` that undoes it can land
  * in different lifted bodies of the same guest routine. */
-RECOMP_TLS int g_df = 0;
+/* (g_df: g_regs/g_vregs) */
 /* EFLAGS: the image pushfd and popfd use (see recomp_types.h). Bit 1 is
  * always set and IF is on, as in any guest thread the kernel schedules. */
-RECOMP_TLS uint32_t g_eflags = 0x00000202u;
+/* (g_eflags: g_regs/g_vregs) */
 
 /* ICALL trace ring buffer */
 volatile uint32_t g_icall_trace[16] = {0};
