@@ -265,6 +265,29 @@ static void img_release(Img *im)
     memset(im, 0, sizeof *im);
 }
 
+/* A fence wait that says so when it runs long: 2 s at a time, each
+ * overrun logged with where and which slot, and a lost device reported
+ * (a GPU fault ends every wait with VK_ERROR_DEVICE_LOST). */
+static void fence_wait(VkFence f, const char *where, uint64_t serial)
+{
+    unsigned waited = 0;
+    for (;;) {
+        VkResult r = vkWaitForFences(s_dev, 1, &f, VK_TRUE, 2000000000ull);
+        if (r == VK_SUCCESS)
+            return;
+        if (r != VK_TIMEOUT) {
+            fprintf(stderr, LOGP "fence wait at %s (serial %llu): error %d%s\n", where,
+                    (unsigned long long)serial, (int)r,
+                    r == VK_ERROR_DEVICE_LOST ? " (device lost)" : "");
+            return;
+        }
+        waited += 2;
+        fprintf(stderr, LOGP "fence wait at %s (serial %llu): %u s and counting\n", where,
+                (unsigned long long)serial, waited);
+        fflush(stderr);
+    }
+}
+
 static void slots_poll(void)
 {
     size_t i, k;
@@ -308,7 +331,7 @@ static void wait_all(void)
     size_t i;
     for (i = 0; i < SLOTS; i++)
         if (s_slot[i].busy)
-            vkWaitForFences(s_dev, 1, &s_slot[i].fence, VK_TRUE, UINT64_MAX);
+            fence_wait(s_slot[i].fence, "wait_all", s_slot[i].serial);
     slots_poll();
     s_done = s_last;
     slots_poll();
@@ -353,7 +376,7 @@ static void ensure_cmd(void)
             for (i = 1; i < SLOTS; i++)
                 if (s_slot[i].serial < old->serial)
                     old = &s_slot[i];
-            vkWaitForFences(s_dev, 1, &old->fence, VK_TRUE, UINT64_MAX);
+            fence_wait(old->fence, "ensure_cmd", old->serial);
             slots_poll();
         }
     }
@@ -441,7 +464,12 @@ static void flush(int wait)
         si.commandBufferCount = n;
         si.pCommandBuffers = cbs;
         nv2a_vk_queue_lock();
-        VKC(vkQueueSubmit(s_queue, 1, &si, s_cur->fence), "vkQueueSubmit");
+        {
+            VkResult sr = vkQueueSubmit(s_queue, 1, &si, s_cur->fence);
+            if (sr != VK_SUCCESS)
+                fprintf(stderr, LOGP "vkQueueSubmit failed: %d%s\n", (int)sr,
+                        sr == VK_ERROR_DEVICE_LOST ? " (device lost)" : "");
+        }
         nv2a_vk_queue_unlock();
         s_cur->busy = 1;
         s_last = s_cur->serial;
