@@ -276,6 +276,7 @@ extern "C" {
     X(METAL_HOST_DUMP,   DEBUG, "metal_host_dump", NULL,                       "=prefix: Metal host-size frame dumps (render.scale, display.aspect) as <prefix>host_NNNNN.bmp, every fb_dump_flips flip") \
     X(METAL_WRITEBACK,   DEBUG, "metal_writeback", NULL,                       "=lazy|always: Metal writes guest memory when a dump reads it (default) or at every flip") \
     X(METAL_FB_GUARD,    DEBUG, "metal_fb_guard",  NULL,                       "trap title reads of the last Metal present surface; a read switches to metal_writeback=always") \
+    X(SKIP_FILES,        CONFIG, "RECOMP_SKIP_FILES",        NULL, "comma list of path suffixes the title is told do not exist (e.g. a movie): TrD_ENG.xmv,TrC_ENG.xmv") \
     X(XR_STEREO,         DEBUG, "xr_stereo",       "RECOMP_XR_STEREO",         "=s,c: VR in-world stereo, parallax pixels and screen-plane depth") \
     X(METAL_OCC,         DEBUG, "metal_occ",       "RECOMP_METAL_OCC",         "=sync|fixed: Metal occlusion mode") \
     X(METAL_SHADER_NONCE, DEBUG, "metal_shader_nonce", NULL, "=text: Metal renames each runtime shader's entry point with this suffix and the PID, so macOS's shader caches miss (cold-cache timing)") \

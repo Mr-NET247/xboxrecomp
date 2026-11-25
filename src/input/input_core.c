@@ -460,6 +460,16 @@ static DWORD filtered(DWORD port, DWORD rc, XBOX_INPUT_STATE *st,
 #endif
 
 static xbox_input_ext_pad_fn g_ext_pad;
+static uint16_t g_pulse_buttons;
+static uint8_t  g_pulse_analog;
+static uint64_t g_pulse_until;
+
+void xbox_InputPulse(uint16_t buttons, uint8_t analog_mask, unsigned ms)
+{
+    __atomic_store_n(&g_pulse_buttons, buttons, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_pulse_analog, analog_mask, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_pulse_until, xbox_InputNowMs() + ms, __ATOMIC_RELEASE);
+}
 
 void xbox_InputSetExtPad(xbox_input_ext_pad_fn fn)
 {
@@ -508,6 +518,21 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
                 xbox_InputMergeKbm(pState, &xs);
             }
         }
+    }
+
+    /* A pulse (xbox_InputPulse) holds its buttons on port 0. */
+    if (dwPort == 0 && xbox_InputNowMs() < __atomic_load_n(&g_pulse_until, __ATOMIC_ACQUIRE)) {
+        if (rc != ERROR_SUCCESS) {
+            memset(pState, 0, sizeof *pState);
+            rc = ERROR_SUCCESS;
+        }
+        uint8_t am = __atomic_load_n(&g_pulse_analog, __ATOMIC_RELAXED);
+        int b;
+        pState->Gamepad.wButtons |= __atomic_load_n(&g_pulse_buttons, __ATOMIC_RELAXED);
+        for (b = 0; b < 8; b++)
+            if (am & (1u << b))
+                pState->Gamepad.bAnalogButtons[b] = 255;
+        pState->dwPacketNumber++;
     }
 
     /* The keyboard answers for port 0 with or without a pad there, and is

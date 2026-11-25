@@ -5016,6 +5016,45 @@ static int bridge_is_cdrom_device(const char *path)
 
 /* Open a file by delegating to the ported xbox_NtCreateFile kernel HLE.
  * bridge_create_file_impl, below, wraps this with the per-attempt log. */
+/* RECOMP_SKIP_FILES: a comma list of path suffixes, compared without
+ * case. "name" makes the file missing; "name=other" opens other in its
+ * place, its last path component swapped (a long movie for a short one:
+ * Burnout 3 waits on a missing movie forever, but plays a short one and
+ * goes on). Returns 0 (no entry), 1 (missing) or 2 (swapped into out). */
+static int bridge_skip_file(const char *p, unsigned len, char *out, size_t outsz)
+{
+    const char *list = recomp_env(RENV_SKIP_FILES), *c;
+    if (!list || !p)
+        return 0;
+    for (c = list; *c; ) {
+        const char *e = strchr(c, ','), *eq;
+        size_t n = e ? (size_t)(e - c) : strlen(c), k, m;
+        eq = memchr(c, '=', n);
+        m = eq ? (size_t)(eq - c) : n;
+        if (m && m <= len) {
+            const char *tail = p + len - m;
+            for (k = 0; k < m && tolower((unsigned char)tail[k]) == tolower((unsigned char)c[k]); k++)
+                ;
+            if (k == m) {
+                size_t keep = len - m, rn = eq ? n - m - 1 : 0;
+                if (eq && rn && keep + rn < outsz) {
+                    memcpy(out, p, keep);
+                    memcpy(out + keep, eq + 1, rn);
+                    out[keep + rn] = 0;
+                    fprintf(stderr, "  [FILE] %.*s -> %s (RECOMP_SKIP_FILES)\n", (int)len, p, out);
+                    return 2;
+                }
+                fprintf(stderr, "  [FILE] %.*s skipped (RECOMP_SKIP_FILES)\n", (int)len, p);
+                return 1;
+            }
+        }
+        if (!e)
+            break;
+        c = e + 1;
+    }
+    return 0;
+}
+
 static NTSTATUS bridge_create_file_open(
     uint32_t handle_va, ACCESS_MASK access, uint32_t obj_attrs_va,
     uint32_t iostatus_va, ULONG file_attrs, ULONG share,
@@ -5044,6 +5083,24 @@ static NTSTATUS bridge_create_file_open(
     }
 
     memset(&ios, 0, sizeof(ios));
+
+    /* RECOMP_SKIP_FILES: files the title is told do not exist (a movie the
+     * player has seen enough of): a comma list of path suffixes, compared
+     * without case. */
+    {
+        static char swap[512];
+        int k = bridge_skip_file(name.Buffer, name.Length, swap, sizeof swap);
+        if (k == 1) {
+            bridge_write_iostatus(iostatus_va, 0xC0000034u /* OBJECT_NAME_NOT_FOUND */, 0);
+            return (NTSTATUS)0xC0000034u;
+        }
+        if (k == 2) {
+            name.Buffer = swap;
+            name.Length = (USHORT)strlen(swap);
+            name.MaximumLength = (USHORT)(name.Length + 1);
+            oa.ObjectName = &name;
+        }
+    }
 
     st = xbox_NtCreateFile(&h, access, &oa, &ios, NULL,
                            file_attrs, share, disposition, options);

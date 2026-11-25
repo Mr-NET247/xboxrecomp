@@ -76,6 +76,12 @@ int xbox_InputPadFilterSet(void);
 typedef int (*xbox_input_ext_pad_fn)(XBOX_INPUT_STATE *st);
 void xbox_InputSetExtPad(xbox_input_ext_pad_fn fn);
 
+/* Hold wButtons (XBOX_GAMEPAD_*) and the analog buttons in mask (bit i:
+ * bAnalogButtons[i], XBOX_BUTTON_*) on port 0 for ms from now, ORed into
+ * whatever else drives it; port 0 reads connected meanwhile even with no
+ * pad (a title's own "press START" answered for the player). */
+void xbox_InputPulse(uint16_t buttons, uint8_t analog_mask, unsigned ms);
+
 /* The mod layer's record of port 0 (mod.h xbox_enhance_pad_seen). Called by
  * xbox_InputGetState under XBOXRECOMP_ENHANCE after the filter, with the
  * state the title is about to get (a failed poll: zeros, connected 0),
