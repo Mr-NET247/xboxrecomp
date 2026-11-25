@@ -5642,6 +5642,8 @@ static void bridge_NtReadFile(void)
     XBOX_IO_STATUS_BLOCK ios;
     LARGE_INTEGER  off = {0};
     PLARGE_INTEGER poff = NULL;
+    XBOX_FILE_POSITION_INFORMATION keep_pos;
+    int restore_pos = 0;
 
     memset(&ios, 0, sizeof(ios));
     if (!bridge_buf_ok(buffer_va, length, "NtReadFile")) {
@@ -5654,8 +5656,30 @@ static void bridge_NtReadFile(void)
         off.HighPart = (LONG)BRIDGE_MEM32(offset_va + 4);
         poff = &off;
     }
+
+    /* A handle opened without FILE_SYNCHRONOUS_IO_* has no current byte
+     * offset on the Xbox: the I/O manager keeps one only for synchronous
+     * handles, so a read at an explicit offset leaves the file position
+     * where it was. The host reads with a seek (lseek + read, or ReadFile
+     * with an OVERLAPPED on a synchronous host handle), which moves it.
+     * Burnout 2 streams 128 KB chunks this way and finds its next offset with
+     * SetFilePointer(FILE_CURRENT, +bytes read): with the host's move added
+     * it skips every other chunk and relocates garbage. Put the position
+     * back, as the console never moved it. */
+    if (poff && bridge_handle_is_async(STACK_ARG(0))) {
+        XBOX_IO_STATUS_BLOCK qios;
+        memset(&qios, 0, sizeof(qios));
+        restore_pos = xbox_NtQueryInformationFile(handle, &qios, &keep_pos,
+                          sizeof(keep_pos), XboxFilePositionInformation) == 0;
+    }
     g_eax = (uint32_t)xbox_NtReadFile(handle, NULL, NULL, NULL, &ios,
                 XBOX_TO_NATIVE(buffer_va), length, poff);
+    if (restore_pos) {
+        XBOX_IO_STATUS_BLOCK sios;
+        memset(&sios, 0, sizeof(sios));
+        xbox_NtSetInformationFile(handle, &sios, &keep_pos, sizeof(keep_pos),
+                                  XboxFilePositionInformation);
+    }
 
     /* What a read actually delivered. A decoder that rejects its input cannot
      * say whether the bytes were wrong or the read was, and the two look
