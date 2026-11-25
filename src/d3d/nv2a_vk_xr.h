@@ -32,6 +32,9 @@ void nv2a_vk_queue_unlock(void);
  * backend's flip and complete by the time gen moves. Call with
  * nv2a_vk_frame_lock held while recording and submitting a read of it. */
 int  nv2a_vk_frame(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen);
+/* The stereo pair (in-world mode): RGBA8, left eye then right, 2w x h,
+ * in GENERAL; under the same lock. */
+int  nv2a_vk_frame_stereo(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen);
 void nv2a_vk_frame_lock(void);
 void nv2a_vk_frame_unlock(void);
 

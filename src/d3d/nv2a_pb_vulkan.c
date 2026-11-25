@@ -108,6 +108,15 @@ static int                           s_legacy;   /* no dynamic rendering: VkRend
 
 /* ---- a VR runtime's share (nv2a_vk_xr.h) ---------------------------------------- */
 static const struct nv2a_vk_xr *s_xr;
+/* The stereo pass without a headset (RECOMP_XR_STEREO set): a test of it on
+ * a desktop, its pairs in the host dumps (metal_host_dump). */
+static int xr_on(void)
+{
+    static int test = -1;
+    if (test < 0)
+        test = recomp_env(RENV_XR_STEREO) != NULL;
+    return s_xr || test;
+}
 static pthread_mutex_t s_qlock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t s_flock = PTHREAD_MUTEX_INITIALIZER;
 void nv2a_pb_vulkan_set_xr(const struct nv2a_vk_xr *xr) { s_xr = xr; }
@@ -1036,6 +1045,7 @@ typedef struct DepthTarget {
     uint32_t zeta, w, h, hw, hh, pad;
     unsigned n;
     Img      tex;
+    VkImageView dview;   /* depth aspect only, for the stereo pass (s_xr) */
     uint64_t last_use;
     int      fresh;
 } DepthTarget;
@@ -1137,6 +1147,10 @@ static DepthTarget *depth_target(uint32_t w, uint32_t h)
         for (i = 0; i < RT_MAX; i++)
             if (s_rt[i].dt == e)
                 s_rt[i].dt = NULL;
+        if (e->dview) {
+            vkDeviceWaitIdle(s_dev);
+            vkDestroyImageView(s_dev, e->dview, NULL);
+        }
         img_release(&e->tex);
         memset(e, 0, sizeof *e);
     }
@@ -1144,10 +1158,22 @@ static DepthTarget *depth_target(uint32_t w, uint32_t h)
     e->n = nv2a_host_size(w + 2u * e->pad, h, nv2a_host_render_scale(), VK_MAX_DIM,
                           &e->hw, &e->hh);
     if (!img_make(&e->tex, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D, s_dfmt, e->hw, e->hh, 1,
-                  1, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                  1, 1, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+                  | (xr_on() ? VK_IMAGE_USAGE_SAMPLED_BIT : 0),
                   VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
         return NULL;
     img_layout(up_cmd(), &e->tex, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    if (xr_on()) {
+        VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vi.image = e->tex.img;
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format = s_dfmt;
+        vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(s_dev, &vi, NULL, &e->dview) != VK_SUCCESS)
+            e->dview = VK_NULL_HANDLE;
+    }
     e->zeta = zeta;
     e->w = w;
     e->h = h;
@@ -3363,10 +3389,199 @@ int nv2a_vk_frame(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen)
     return 1;
 }
 
+/* ---- stereo from depth (in-world mode) ----------------------------------------
+ *
+ * The frame and its depth buffer make a side-by-side pair, left eye then
+ * right, each pixel shifted by half its parallax: s * (1 - (1 - d) / (1 - c))
+ * host pixels, d the stored depth (z / zmax), c the depth that sits on the
+ * screen plane. For a D3D projection 1 - d is about near / w, so that is
+ * s * (1 - w_c / w): 0 at the screen plane, s at infinity, negative nearer.
+ * A gather: each output pixel reads the depth under itself, then the colour
+ * that far across. RECOMP_XR_STEREO=s,c sets them (default 2% of the width,
+ * 0.98). */
+static const char s_stereo_glsl[] =
+    "#version 450\n"
+    "layout(local_size_x = 8, local_size_y = 8) in;\n"
+    "layout(set = 0, binding = 0) uniform sampler2D col;\n"
+    "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+    "layout(set = 0, binding = 2, rgba8) writeonly uniform image2D outi;\n"
+    "layout(push_constant) uniform P { vec4 a; } pc;   /* s, c, w, h */\n"
+    "void main() {\n"
+    "    ivec2 g = ivec2(gl_GlobalInvocationID.xy);\n"
+    "    int w = int(pc.a.z), h = int(pc.a.w);\n"
+    "    if (g.x >= 2 * w || g.y >= h) return;\n"
+    "    float eye = g.x < w ? -1.0 : 1.0;\n"
+    "    int x = g.x < w ? g.x : g.x - w;\n"
+    "    float d = texelFetch(dep, ivec2(x, g.y), 0).r;\n"
+    "    float k = (1.0 - d) / max(1.0 - pc.a.y, 1e-5);\n"
+    "    float p = clamp(pc.a.x * (1.0 - k), -2.0 * pc.a.x, pc.a.x);\n"
+    "    int sx = clamp(int(float(x) - eye * 0.5 * p + 0.5), 0, w - 1);\n"
+    "    imageStore(outi, g, texelFetch(col, ivec2(sx, g.y), 0));\n"
+    "}\n";
+
+static VkPipeline s_st_pso;
+static VkPipelineLayout s_st_layout;
+static VkDescriptorSetLayout s_st_dsl;
+static VkDescriptorPool s_st_pool;
+static VkDescriptorSet s_st_set;
+static VkSampler s_st_smp;
+static Img      s_xr_sbs;        /* RGBA8, 2w x h: left | right */
+static uint64_t s_xr_sbs_gen;
+static float    s_st_s = -1.0f, s_st_c = 0.98f;
+
+int nv2a_vk_frame_stereo(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen)
+{
+    if (!s_xr_sbs.img || !s_xr_sbs_gen)
+        return 0;
+    *img = s_xr_sbs.img;
+    *w = s_xr_sbs.w;
+    *h = s_xr_sbs.h;
+    *gen = s_xr_sbs_gen;
+    return 1;
+}
+
+static int stereo_init(void)
+{
+    static int tried;
+    VkDescriptorSetLayoutBinding b[3];
+    VkDescriptorSetLayoutCreateInfo dl = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+    VkPushConstantRange pr = { VK_SHADER_STAGE_COMPUTE_BIT, 0, 16 };
+    VkPipelineLayoutCreateInfo pl = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    VkDescriptorPoolSize ps[2] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 },
+                                   { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 } };
+    VkDescriptorPoolCreateInfo dp = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+    VkDescriptorSetAllocateInfo da = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+    VkSamplerCreateInfo sc = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    VkComputePipelineCreateInfo ci = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    shaderc_compilation_result_t r;
+    VkShaderModuleCreateInfo mi = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    VkShaderModule m = VK_NULL_HANDLE;
+    const char *e;
+    int i;
+
+    if (tried)
+        return s_st_pso != VK_NULL_HANDLE;
+    tried = 1;
+    e = recomp_env(RENV_XR_STEREO);
+    if (e)
+        sscanf(e, "%f,%f", &s_st_s, &s_st_c);
+    memset(b, 0, sizeof b);
+    for (i = 0; i < 3; i++) {
+        b[i].binding = (uint32_t)i;
+        b[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                    : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        b[i].descriptorCount = 1;
+        b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    dl.bindingCount = 3;
+    dl.pBindings = b;
+    if (vkCreateDescriptorSetLayout(s_dev, &dl, NULL, &s_st_dsl) != VK_SUCCESS)
+        return 0;
+    pl.setLayoutCount = 1;
+    pl.pSetLayouts = &s_st_dsl;
+    pl.pushConstantRangeCount = 1;
+    pl.pPushConstantRanges = &pr;
+    if (vkCreatePipelineLayout(s_dev, &pl, NULL, &s_st_layout) != VK_SUCCESS)
+        return 0;
+    dp.maxSets = 1;
+    dp.poolSizeCount = 2;
+    dp.pPoolSizes = ps;
+    if (vkCreateDescriptorPool(s_dev, &dp, NULL, &s_st_pool) != VK_SUCCESS)
+        return 0;
+    da.descriptorPool = s_st_pool;
+    da.descriptorSetCount = 1;
+    da.pSetLayouts = &s_st_dsl;
+    if (vkAllocateDescriptorSets(s_dev, &da, &s_st_set) != VK_SUCCESS)
+        return 0;
+    sc.magFilter = sc.minFilter = VK_FILTER_NEAREST;
+    sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(s_dev, &sc, NULL, &s_st_smp) != VK_SUCCESS)
+        return 0;
+    r = shaderc_compile_into_spv(s_cc, s_stereo_glsl, strlen(s_stereo_glsl),
+                                 shaderc_compute_shader, "stereo", "main", s_copt);
+    if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
+        fprintf(stderr, LOGP "stereo shader: %s\n", shaderc_result_get_error_message(r));
+        shaderc_result_release(r);
+        return 0;
+    }
+    mi.codeSize = shaderc_result_get_length(r);
+    mi.pCode = (const uint32_t *)shaderc_result_get_bytes(r);
+    vkCreateShaderModule(s_dev, &mi, NULL, &m);
+    shaderc_result_release(r);
+    if (!m)
+        return 0;
+    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    ci.stage.module = m;
+    ci.stage.pName = "main";
+    ci.layout = s_st_layout;
+    if (vkCreateComputePipelines(s_dev, s_pcache, 1, &ci, NULL, &s_st_pso) != VK_SUCCESS)
+        s_st_pso = VK_NULL_HANDLE;
+    vkDestroyShaderModule(s_dev, m, NULL);
+    fprintf(stderr, LOGP "stereo from depth: %s\n", s_st_pso ? "ready" : "failed");
+    return s_st_pso != VK_NULL_HANDLE;
+}
+
+/* The pair from rt's frame (w x h host pixels) and its depth buffer. */
+static void stereo_pass(RenderTarget *rt, uint32_t w, uint32_t h)
+{
+    VkDescriptorImageInfo ii[3];
+    VkWriteDescriptorSet wr[3];
+    float pc[4];
+    int i;
+
+    if (!rt->dt || !rt->dt->dview || !stereo_init())
+        return;
+    if (!s_xr_sbs.img || s_xr_sbs.w != 2u * w || s_xr_sbs.h != h) {
+        if (s_xr_sbs.img) {
+            nv2a_vk_queue_lock();
+            vkQueueWaitIdle(s_queue);
+            nv2a_vk_queue_unlock();
+            img_destroy_now(&s_xr_sbs);
+        }
+        if (!img_make(&s_xr_sbs, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D,
+                      VK_FORMAT_R8G8B8A8_UNORM, 2u * w, h, 1, 1, 1,
+                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT))
+            return;
+        img_layout(up_cmd(), &s_xr_sbs, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    memset(ii, 0, sizeof ii);
+    memset(wr, 0, sizeof wr);
+    ii[0].sampler = ii[1].sampler = s_st_smp;
+    ii[0].imageView = rt->tex.view;
+    ii[1].imageView = rt->dt->dview;
+    ii[2].imageView = s_xr_sbs.view;
+    for (i = 0; i < 3; i++) {
+        ii[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        wr[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        wr[i].dstSet = s_st_set;
+        wr[i].dstBinding = (uint32_t)i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                     : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        wr[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(s_dev, 3, wr, 0, NULL);
+    pc[0] = s_st_s >= 0.0f ? s_st_s : 0.02f * (float)w;
+    pc[1] = s_st_c;
+    pc[2] = (float)w;
+    pc[3] = (float)h;
+    end_encoder();
+    ensure_cmd();
+    barrier_all(s_cur->cmd);
+    vkCmdBindPipeline(s_cur->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_st_pso);
+    vkCmdBindDescriptorSets(s_cur->cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_st_layout, 0, 1,
+                            &s_st_set, 0, NULL);
+    vkCmdPushConstants(s_cur->cmd, s_st_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vkCmdDispatch(s_cur->cmd, (2u * w + 7u) / 8u, (h + 7u) / 8u, 1);
+    barrier_all(s_cur->cmd);
+}
+
 /* At the flip, before its wait: the frame's host pixels into s_xr_img. */
 static void xr_frame_copy(RenderTarget *rt, uint32_t w, uint32_t h)
 {
-    if (!s_xr || !rt || !w || !h)
+    if (!xr_on() || !rt || !w || !h)
         return;
     nv2a_vk_frame_lock();
     if (!s_xr_img.img || s_xr_img.w != w || s_xr_img.h != h) {
@@ -3383,6 +3598,7 @@ static void xr_frame_copy(RenderTarget *rt, uint32_t w, uint32_t h)
         }
     }
     copy_image(&rt->tex, 0, 0, &s_xr_img, 0, 0, w, h);
+    stereo_pass(rt, w, h);
     nv2a_vk_frame_unlock();
 }
 
@@ -3463,8 +3679,31 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
         occ_settle(1);
         if (s_xr && rt && s_xr_img.img)
             __atomic_store_n(&s_xr_gen, s_xr_gen + 1, __ATOMIC_RELEASE);
+        if (s_xr && rt && s_xr_sbs.img)
+            __atomic_store_n(&s_xr_sbs_gen, s_xr_sbs_gen + 1, __ATOMIC_RELEASE);
         if (px && host_dump_due())
             host_dump(px, rt->hw * 4u, hcw, hch);
+        if (!s_xr && s_xr_sbs.img && host_dump_due()) {
+            /* the stereo test: the pair beside the frame, RGBA as BGRA */
+            const uint8_t *sp = img_readback(&s_xr_sbs, 0, 0, s_xr_sbs.w, s_xr_sbs.h);
+            if (sp) {
+                static uint8_t *bg;
+                size_t n = (size_t)s_xr_sbs.w * s_xr_sbs.h, k;
+                if ((bg = (uint8_t *)realloc(bg, n * 4u)) != NULL) {
+                    for (k = 0; k < n; k++) {
+                        bg[k * 4] = sp[k * 4 + 2];
+                        bg[k * 4 + 1] = sp[k * 4 + 1];
+                        bg[k * 4 + 2] = sp[k * 4];
+                        bg[k * 4 + 3] = sp[k * 4 + 3];
+                    }
+                    s_presents += 500000;   /* its own file name */
+                    host_dump(bg, s_xr_sbs.w * 4u, s_xr_sbs.w, s_xr_sbs.h);
+                    s_presents -= 500000;
+                }
+            }
+            /* the shared readback buffer now holds the pair: the frame again */
+            px = img_readback(&rt->tex, 0, 0, rt->hw, rt->hh);
+        }
         if (wb && px) {
             write_back_px(rt, px, addr, pitch);
             rt->dirty = 0;
@@ -3523,6 +3762,10 @@ static void scale_drop(void)
             continue;
         if (s_enc_dt == dd)
             end_encoder();
+        if (dd->dview) {
+            vkDeviceWaitIdle(s_dev);
+            vkDestroyImageView(s_dev, dd->dview, NULL);
+        }
         img_release(&dd->tex);
         memset(dd, 0, sizeof *dd);
     }

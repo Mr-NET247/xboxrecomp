@@ -19,8 +19,9 @@
  * The right stick click is the camera button, not the game's: a short tap
  * cycles Burnout's camera (a Y tap), a long press (XR_LONG_NS) switches
  * between external mode (the screen fixed in the room, where the
- * headset's recenter puts it) and in-world mode (for now a wide screen
- * locked to the head; per-eye stereo from the car is to come).
+ * headset's recenter puts it) and in-world mode (a wide screen
+ * locked to the head, in stereo: each eye its own view, made from the
+ * frame and its depth buffer by the Vulkan backend (nv2a_vk_frame_stereo).
  */
 #if defined(XBR_HAVE_OPENXR) && defined(__ANDROID__)
 
@@ -50,9 +51,9 @@ static XrInstance s_xi;
 static XrSystemId s_sys;
 static XrSession  s_sess;
 static XrSpace    s_space;
-static XrSwapchain s_sc;
-static uint32_t   s_sc_w = 1280, s_sc_h = 960, s_sc_n;
-static VkImage    s_sc_img[8];
+static XrSwapchain s_sc, s_sc2;          /* the screen; the stereo pair */
+static uint32_t   s_sc_w = 1280, s_sc_h = 960, s_sc_n, s_sc2_n;
+static VkImage    s_sc_img[8], s_sc2_img[8];
 static VkDevice   s_dev;
 static VkQueue    s_queue;
 static VkCommandPool   s_pool;
@@ -399,6 +400,17 @@ static void vk_ready(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, uint32_
     xrEnumerateSwapchainImages(s_sc, 8, &s_sc_n, (XrSwapchainImageBaseHeader *)imgs);
     for (i = 0; i < s_sc_n; i++)
         s_sc_img[i] = imgs[i].image;
+    /* In-world's stereo pair, side by side: left eye, right eye. */
+    sc.width = 2u * s_sc_w;
+    if (xr_ok(xrCreateSwapchain(s_sess, &sc, &s_sc2), "stereo swapchain")) {
+        for (i = 0; i < 8; i++) {
+            imgs[i].type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
+            imgs[i].next = NULL;
+        }
+        xrEnumerateSwapchainImages(s_sc2, 8, &s_sc2_n, (XrSwapchainImageBaseHeader *)imgs);
+        for (i = 0; i < s_sc2_n; i++)
+            s_sc2_img[i] = imgs[i].image;
+    }
     cp.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     cp.queueFamilyIndex = qfam;
     vkCreateCommandPool(dev, &cp, NULL, &s_pool);
@@ -432,8 +444,9 @@ static void barrier(VkImage img, VkImageLayout from, VkImageLayout to)
                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
-/* The latest game frame into swapchain image i (black before the first). */
-static void draw(uint32_t i)
+/* The latest game frame into swapchain image dst, dw x dh (black before
+ * the first); stereo: the side-by-side pair instead. */
+static void draw(VkImage dst, uint32_t dw, uint32_t dh, int stereo)
 {
     VkCommandBufferBeginInfo bi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
@@ -443,12 +456,13 @@ static void draw(uint32_t i)
     int have;
 
     nv2a_vk_frame_lock();
-    have = nv2a_vk_frame(&src, &w, &h, &gen);
+    have = stereo ? nv2a_vk_frame_stereo(&src, &w, &h, &gen)
+                  : nv2a_vk_frame(&src, &w, &h, &gen);
     vkResetFences(s_dev, 1, &s_fence);
     vkResetCommandBuffer(s_cb, 0);
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(s_cb, &bi);
-    barrier(s_sc_img[i], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    barrier(dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     if (have) {
         VkImageBlit r;
         memset(&r, 0, sizeof r);
@@ -457,18 +471,18 @@ static void draw(uint32_t i)
         r.srcOffsets[1].x = (int32_t)w;
         r.srcOffsets[1].y = (int32_t)h;
         r.srcOffsets[1].z = 1;
-        r.dstOffsets[1].x = (int32_t)s_sc_w;
-        r.dstOffsets[1].y = (int32_t)s_sc_h;
+        r.dstOffsets[1].x = (int32_t)dw;
+        r.dstOffsets[1].y = (int32_t)dh;
         r.dstOffsets[1].z = 1;
-        vkCmdBlitImage(s_cb, src, VK_IMAGE_LAYOUT_GENERAL, s_sc_img[i],
+        vkCmdBlitImage(s_cb, src, VK_IMAGE_LAYOUT_GENERAL, dst,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r, VK_FILTER_LINEAR);
     } else {
         VkClearColorValue black = { { 0, 0, 0, 1 } };
         VkImageSubresourceRange rr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        vkCmdClearColorImage(s_cb, s_sc_img[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black,
+        vkCmdClearColorImage(s_cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black,
                              1, &rr);
     }
-    barrier(s_sc_img[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    barrier(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkEndCommandBuffer(s_cb);
     si.commandBufferCount = 1;
@@ -516,7 +530,8 @@ static void *frame_thread(void *arg)
         XrFrameBeginInfo bi = { XR_TYPE_FRAME_BEGIN_INFO };
         XrFrameEndInfo ei = { XR_TYPE_FRAME_END_INFO };
         XrCompositionLayerQuad quad = { XR_TYPE_COMPOSITION_LAYER_QUAD };
-        const XrCompositionLayerBaseHeader *layers[1];
+        XrCompositionLayerQuad quad2 = { XR_TYPE_COMPOSITION_LAYER_QUAD };
+        const XrCompositionLayerBaseHeader *layers[2];
 
         handle_events();
         if (!s_running) {
@@ -537,14 +552,16 @@ static void *frame_thread(void *arg)
             XrSwapchainImageWaitInfo wi2 = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
             XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
             uint32_t idx = 0;
+            int st = s_inworld && s_sc2;   /* the stereo pair */
+            XrSwapchain sw = st ? s_sc2 : s_sc;
             nv2a_vk_queue_lock();
-            xrAcquireSwapchainImage(s_sc, &ai, &idx);
+            xrAcquireSwapchainImage(sw, &ai, &idx);
             nv2a_vk_queue_unlock();
             wi2.timeout = XR_INFINITE_DURATION;
-            xrWaitSwapchainImage(s_sc, &wi2);
-            draw(idx);
+            xrWaitSwapchainImage(sw, &wi2);
+            draw(st ? s_sc2_img[idx] : s_sc_img[idx], st ? 2u * s_sc_w : s_sc_w, s_sc_h, st);
             nv2a_vk_queue_lock();
-            xrReleaseSwapchainImage(s_sc, &ri);
+            xrReleaseSwapchainImage(sw, &ri);
             nv2a_vk_queue_unlock();
             /* External: a 3 m by 2.25 m screen (4:3), 2.2 m ahead of where
              * the head was at the last recenter. In-world (interim): locked
@@ -563,6 +580,16 @@ static void *frame_thread(void *arg)
                 quad.pose.position.z = -1.0f;
             layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
             ei.layerCount = 1;
+            if (st) {
+                /* Each eye its half of the pair. */
+                quad.subImage.swapchain = s_sc2;
+                quad.eyeVisibility = XR_EYE_VISIBILITY_LEFT;
+                quad2 = quad;
+                quad2.eyeVisibility = XR_EYE_VISIBILITY_RIGHT;
+                quad2.subImage.imageRect.offset.x = (int32_t)s_sc_w;
+                layers[1] = (const XrCompositionLayerBaseHeader *)&quad2;
+                ei.layerCount = 2;
+            }
             ei.layers = layers;
         }
         nv2a_vk_queue_lock();
