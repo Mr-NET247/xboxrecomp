@@ -976,7 +976,18 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         /* One event loop for the window and the controllers: SDL_PumpEvents
          * (inside the wait) also updates the game controllers, which
          * xinput_device.c then only reads. */
+#if defined(__ANDROID__)
+        /* SDL's wait busy-polls on Android (clock reads, locks and the
+         * joystick update in a loop): on a Pixel 7 Pro it held a fast core
+         * at 100% and the guest ran at a few frames a second. Poll, and
+         * sleep 2 ms when there is nothing to do. */
+        int got = SDL_PollEvent(&ev);
+        if (!got)
+            SDL_DelayNS(2000000);
+        if (got) {
+#else
         if (SDL_WaitEventTimeout(&ev, 100)) {
+#endif
             do {
                 /* Keys and the mouse for port 0, and the window events
                  * that release them; both only read the event. */
