@@ -99,9 +99,10 @@ static VkPipelineLayout  s_playout;
 static VkDescriptorSetLayout s_dsl;
 static VkPipelineCache   s_pcache;
 static VkQueryPool       s_qpool;
-static PFN_vkCmdPushDescriptorSetKHR s_push_desc;
+static PFN_vkCmdPushDescriptorSetKHR s_push_desc;   /* NULL: sets from slot pools */
 static PFN_vkCmdBeginRenderingKHR    s_begin_rendering;
 static PFN_vkCmdEndRenderingKHR      s_end_rendering;
+static int                           s_legacy;   /* no dynamic rendering: VkRenderPass */
 static shaderc_compiler_t            s_cc;
 static shaderc_compile_options_t     s_copt;
 static VkShaderModule    s_vs_pass, s_fs_basic;
@@ -189,9 +190,11 @@ typedef struct {
  * dropped while a slot may still read it waits in the graveyard for its
  * serial to complete. */
 #define SLOTS 8
+#define DSETS 8192   /* sets per slot without push descriptors */
 typedef struct {
     VkCommandBuffer cmd, up;
     VkFence         fence;
+    VkDescriptorPool dpool;   /* without push descriptors: this slot's sets */
     uint64_t        serial;
     int             busy;     /* submitted, fence not yet seen */
     int             up_used;
@@ -203,7 +206,7 @@ static uint64_t s_serial = 1;   /* the next slot's serial */
 static uint64_t s_done;         /* every serial <= this has completed */
 static uint64_t s_last;         /* the last submitted serial */
 
-typedef struct { Img img; VkBuffer buf; VkDeviceMemory mem; uint64_t serial; } Grave;
+typedef struct { Img img; VkFramebuffer fb; uint64_t serial; } Grave;
 static Grave   *s_grave;
 static size_t   s_ngrave, s_grave_cap;
 
@@ -215,11 +218,14 @@ static void img_destroy_now(Img *im)
     memset(im, 0, sizeof *im);
 }
 
+static void fb_forget(VkImageView v);
+
 /* Free im once nothing in flight can read it. */
 static void img_release(Img *im)
 {
     if (!im->img)
         return;
+    fb_forget(im->view);
     if (s_ngrave == s_grave_cap) {
         size_t n = s_grave_cap ? s_grave_cap * 2 : 64;
         Grave *g = (Grave *)realloc(s_grave, n * sizeof *g);
@@ -257,8 +263,11 @@ static void slots_poll(void)
         }
     }
     for (i = k = 0; i < s_ngrave; i++) {
-        if (s_grave[i].serial <= s_done)
+        if (s_grave[i].serial <= s_done) {
             img_destroy_now(&s_grave[i].img);
+            if (s_grave[i].fb)
+                vkDestroyFramebuffer(s_dev, s_grave[i].fb, NULL);
+        }
         else
             s_grave[k++] = s_grave[i];
     }
@@ -334,6 +343,8 @@ static void ensure_cmd(void)
     vkBeginCommandBuffer(s->cmd, &bi);
     s->serial = s_serial++;
     s->up_used = 0;
+    if (s->dpool)
+        vkResetDescriptorPool(s_dev, s->dpool, 0);
     s_cur = s;
 }
 
@@ -379,7 +390,10 @@ static void end_encoder(void)
 {
     if (s_in_pass) {
         occ_pass_end();
-        s_end_rendering(s_cur->cmd);
+        if (s_legacy)
+            vkCmdEndRenderPass(s_cur->cmd);
+        else
+            s_end_rendering(s_cur->cmd);
         s_in_pass = 0;
     }
     s_enc_rt = NULL;
@@ -560,18 +574,14 @@ static int init_device(void)
     vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nde, NULL);
     de = (VkExtensionProperties *)calloc(nde ? nde : 1, sizeof *de);
     vkEnumerateDeviceExtensionProperties(s_pdev, NULL, &nde, de);
-    if (!has_ext(de, nde, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME)) {
-        fprintf(stderr, LOGP "%s: no VK_KHR_push_descriptor\n", s_props.deviceName);
-        free(de);
-        return 0;
-    }
-    dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
-    if (!core13) {
-        if (!has_ext(de, nde, "VK_KHR_dynamic_rendering")) {
-            fprintf(stderr, LOGP "%s: no dynamic rendering\n", s_props.deviceName);
-            free(de);
-            return 0;
-        }
+    /* Push descriptors when the device has them; else each draw's set
+     * comes from its slot's pool (the Android emulator, some phones). */
+    if (has_ext(de, nde, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+        dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
+    if (!core13 && !has_ext(de, nde, "VK_KHR_dynamic_rendering")) {
+        /* Render pass objects instead (Vulkan 1.1 drivers, the emulator). */
+        s_legacy = 1;
+    } else if (!core13) {
         dext[ndext++] = "VK_KHR_dynamic_rendering";
         if (has_ext(de, nde, "VK_KHR_depth_stencil_resolve"))
             dext[ndext++] = "VK_KHR_depth_stencil_resolve";
@@ -596,7 +606,7 @@ static int init_device(void)
     qci.queueFamilyIndex = s_qfam;
     qci.queueCount = 1;
     qci.pQueuePriorities = &prio;
-    dci.pNext = &dr;
+    dci.pNext = s_legacy ? NULL : &dr;
     dci.queueCreateInfoCount = 1;
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = ndext;
@@ -607,13 +617,18 @@ static int init_device(void)
         return 0;
     }
     vkGetDeviceQueue(s_dev, s_qfam, 0, &s_queue);
-    s_push_desc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(s_dev,
-                                                                     "vkCmdPushDescriptorSetKHR");
-    s_begin_rendering = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
-        s_dev, core13 ? "vkCmdBeginRendering" : "vkCmdBeginRenderingKHR");
-    s_end_rendering = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(
-        s_dev, core13 ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
-    if (!s_push_desc || !s_begin_rendering || !s_end_rendering) {
+    s_push_desc = NULL;
+    for (i = 0; i < ndext; i++)
+        if (!strcmp(dext[i], VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME))
+            s_push_desc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(
+                s_dev, "vkCmdPushDescriptorSetKHR");
+    if (!s_legacy) {
+        s_begin_rendering = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(
+            s_dev, core13 ? "vkCmdBeginRendering" : "vkCmdBeginRenderingKHR");
+        s_end_rendering = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(
+            s_dev, core13 ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
+    }
+    if (!s_legacy && (!s_begin_rendering || !s_end_rendering)) {
         fprintf(stderr, LOGP "missing device entry points\n");
         return 0;
     }
@@ -663,7 +678,7 @@ static int init_objects(void)
         b[i].descriptorCount = 1;
         b[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    dl.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
+    dl.flags = s_push_desc ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0;
     dl.bindingCount = 10;
     dl.pBindings = b;
     if (vkCreateDescriptorSetLayout(s_dev, &dl, NULL, &s_dsl) != VK_SUCCESS)
@@ -686,6 +701,18 @@ static int init_objects(void)
                 || vkAllocateCommandBuffers(s_dev, &ca, &s_slot[i].up) != VK_SUCCESS
                 || vkCreateFence(s_dev, &fi, NULL, &s_slot[i].fence) != VK_SUCCESS)
             return 0;
+        if (!s_push_desc) {
+            VkDescriptorPoolSize ps[3] = {
+                { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2u * DSETS },
+                { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4u * DSETS },
+                { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4u * DSETS } };
+            VkDescriptorPoolCreateInfo dp = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
+            dp.maxSets = DSETS;
+            dp.poolSizeCount = 3;
+            dp.pPoolSizes = ps;
+            if (vkCreateDescriptorPool(s_dev, &dp, NULL, &s_slot[i].dpool) != VK_SUCCESS)
+                return 0;
+        }
     }
     qi.queryType = VK_QUERY_TYPE_OCCLUSION;
     qi.queryCount = VIS_SLOTS;
@@ -724,11 +751,13 @@ static int init(void)
         return 0;
     }
     fprintf(stderr, LOGP "device up: %s (Vulkan %u.%u.%u), depth %s, BC %d, aniso %d,"
-            " precise occlusion %d; present by readback, write-back on demand\n",
+            " precise occlusion %d, push descriptors %d, %s; present by readback, write-back"
+            " on demand\n",
             s_props.deviceName, VK_VERSION_MAJOR(s_props.apiVersion),
             VK_VERSION_MINOR(s_props.apiVersion), VK_VERSION_PATCH(s_props.apiVersion),
             s_dfmt == VK_FORMAT_D32_SFLOAT_S8_UINT ? "D32S8" : "D24S8", s_bc, s_aniso,
-            s_precise_occ);
+            s_precise_occ, s_push_desc != NULL,
+            s_legacy ? "render pass objects" : "dynamic rendering");
     s_failed = 0;
     return 1;
 }
@@ -867,6 +896,118 @@ static const uint8_t *img_readback(Img *im, uint32_t x, uint32_t y, uint32_t w, 
      * vertices already (rt_sync runs inside on_draw) */
     flush_keep();
     return s_rb.map;
+}
+
+/* ---- render pass objects (no dynamic rendering) --------------------------------
+ *
+ * One pass per (depth attachment, colour load, depth load, stencil load),
+ * every attachment in GENERAL before and after, as dynamic rendering keeps
+ * them; pipelines and framebuffers are made against the all-load pass of
+ * their depth case, which every pass of that case is compatible with. */
+static VkRenderPass s_rp[2][8];
+
+static VkRenderPass rp_get(int depth, int cclear, int zclear, int sclear)
+{
+    unsigned k = (unsigned)(cclear | zclear << 1 | sclear << 2);
+    VkAttachmentDescription a[2];
+    VkAttachmentReference cr = { 0, VK_IMAGE_LAYOUT_GENERAL }, dr = { 1, VK_IMAGE_LAYOUT_GENERAL };
+    VkSubpassDescription sp;
+    VkRenderPassCreateInfo ci = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+    if (!depth)
+        k &= 1u;
+    if (s_rp[depth][k])
+        return s_rp[depth][k];
+    memset(a, 0, sizeof a);
+    a[0].format = VK_FORMAT_B8G8R8A8_UNORM;
+    a[0].samples = VK_SAMPLE_COUNT_1_BIT;
+    a[0].loadOp = cclear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    a[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    a[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    a[0].initialLayout = a[0].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    a[1].format = s_dfmt;
+    a[1].samples = VK_SAMPLE_COUNT_1_BIT;
+    a[1].loadOp = zclear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    a[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a[1].stencilLoadOp = sclear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    a[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a[1].initialLayout = a[1].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+    memset(&sp, 0, sizeof sp);
+    sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sp.colorAttachmentCount = 1;
+    sp.pColorAttachments = &cr;
+    sp.pDepthStencilAttachment = depth ? &dr : NULL;
+    ci.attachmentCount = depth ? 2 : 1;
+    ci.pAttachments = a;
+    ci.subpassCount = 1;
+    ci.pSubpasses = &sp;
+    if (vkCreateRenderPass(s_dev, &ci, NULL, &s_rp[depth][k]) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return s_rp[depth][k];
+}
+
+#define FB_MAX 64
+static struct { VkImageView c, d; uint32_t w, h; VkFramebuffer fb; } s_fb[FB_MAX];
+static int s_fb_n;
+
+static VkFramebuffer fb_get(VkImageView c, VkImageView d, uint32_t w, uint32_t h)
+{
+    VkFramebufferCreateInfo ci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+    VkImageView v[2] = { c, d };
+    VkFramebuffer fb;
+    int i;
+    for (i = 0; i < s_fb_n; i++)
+        if (s_fb[i].c == c && s_fb[i].d == d && s_fb[i].w == w && s_fb[i].h == h)
+            return s_fb[i].fb;
+    ci.renderPass = rp_get(d != VK_NULL_HANDLE, 0, 0, 0);
+    ci.attachmentCount = d ? 2 : 1;
+    ci.pAttachments = v;
+    ci.width = w;
+    ci.height = h;
+    ci.layers = 1;
+    if (vkCreateFramebuffer(s_dev, &ci, NULL, &fb) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    if (s_fb_n == FB_MAX) {
+        /* full: the oldest goes, once nothing in flight uses it */
+        fb_forget(s_fb[0].c);
+        if (s_fb_n == FB_MAX)
+            return fb;   /* (cannot happen: fb_forget removed slot 0) */
+    }
+    s_fb[s_fb_n].c = c;
+    s_fb[s_fb_n].d = d;
+    s_fb[s_fb_n].w = w;
+    s_fb[s_fb_n].h = h;
+    s_fb[s_fb_n].fb = fb;
+    s_fb_n++;
+    return fb;
+}
+
+/* Every framebuffer over view v goes to the graveyard. */
+static void fb_forget(VkImageView v)
+{
+    int i, k;
+    for (i = k = 0; i < s_fb_n; i++) {
+        if (s_fb[i].c == v || s_fb[i].d == v) {
+            if (s_ngrave == s_grave_cap) {
+                size_t n = s_grave_cap ? s_grave_cap * 2 : 64;
+                Grave *g = (Grave *)realloc(s_grave, n * sizeof *g);
+                if (!g) {
+                    vkDeviceWaitIdle(s_dev);
+                    vkDestroyFramebuffer(s_dev, s_fb[i].fb, NULL);
+                    continue;
+                }
+                s_grave = g;
+                s_grave_cap = n;
+            }
+            memset(&s_grave[s_ngrave], 0, sizeof s_grave[s_ngrave]);
+            s_grave[s_ngrave].fb = s_fb[i].fb;
+            s_grave[s_ngrave].serial = s_cur ? s_cur->serial : s_last;
+            s_ngrave++;
+        } else {
+            s_fb[k++] = s_fb[i];
+        }
+    }
+    s_fb_n = k;
 }
 
 /* ---- render targets: one per guest surface (nv2a_pb_metal.m's rules) ------------ */
@@ -1241,7 +1382,23 @@ static void begin_pass(RenderTarget *rt, int clear, const double c[4],
         ri.pStencilAttachment = &sa;
         dt->fresh = 0;
     }
-    s_begin_rendering(s_cur->cmd, &ri);
+    if (s_legacy) {
+        VkRenderPassBeginInfo bi = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+        VkClearValue cv[2];
+        int zc = dt && da.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        int sc = dt && sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR;
+        cv[0] = ca.clearValue;
+        cv[1].depthStencil.depth = da.clearValue.depthStencil.depth;
+        cv[1].depthStencil.stencil = sa.clearValue.depthStencil.stencil;
+        bi.renderPass = rp_get(dt != NULL, clear, zc, sc);
+        bi.framebuffer = fb_get(rt->tex.view, dt ? dt->tex.view : VK_NULL_HANDLE, rt->hw, rt->hh);
+        bi.renderArea = ri.renderArea;
+        bi.clearValueCount = dt ? 2 : 1;
+        bi.pClearValues = cv;
+        vkCmdBeginRenderPass(s_cur->cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    } else {
+        s_begin_rendering(s_cur->cmd, &ri);
+    }
     s_in_pass = 1;
     s_enc_serial++;
     s_enc_rt = rt;
@@ -1522,7 +1679,10 @@ static VkPipeline pipeline(VkShaderModule vs, VkShaderModule fs, int topo, int c
             rci.depthAttachmentFormat = s_dfmt;
             rci.stencilAttachmentFormat = s_dfmt;
         }
-        pci.pNext = &rci;
+        if (s_legacy)
+            pci.renderPass = rp_get(key[5] != 0, 0, 0, 0);
+        else
+            pci.pNext = &rci;
         pci.stageCount = 2;
         pci.pStages = st;
         pci.pVertexInputState = &vi;
@@ -2745,7 +2905,28 @@ static void vk_on_draw(const struct nv2a_pb_draw *d)
             w[nw].pImageInfo = &ii[k];
             nw++;
         }
-        s_push_desc(s_cur->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 0, nw, w);
+        if (s_push_desc) {
+            s_push_desc(s_cur->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 0, nw, w);
+        } else {
+            VkDescriptorSetAllocateInfo ai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            VkDescriptorSet set;
+            uint32_t j;
+            ai.descriptorPool = s_cur->dpool;
+            ai.descriptorSetCount = 1;
+            ai.pSetLayouts = &s_dsl;
+            if (vkAllocateDescriptorSets(s_dev, &ai, &set) != VK_SUCCESS) {
+                /* the slot's pool is spent: this draw is dropped, and the
+                 * next one starts a fresh slot */
+                s_draws_skipped++;
+                flush(0);
+                return;
+            }
+            for (j = 0; j < nw; j++)
+                w[j].dstSet = set;
+            vkUpdateDescriptorSets(s_dev, nw, w, 0, NULL);
+            vkCmdBindDescriptorSets(s_cur->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, s_playout, 0,
+                                    1, &set, 0, NULL);
+        }
     }
     if (nv2a_tex_dump_on()) {
         int dump_2d = !d->program;
