@@ -557,7 +557,10 @@ static int init_device(void)
         iext[niext++] = "VK_KHR_get_physical_device_properties2";
     free(ie);
     app.pApplicationName = "xboxrecomp";
-    app.apiVersion = VK_API_VERSION_1_1;
+    /* 1.3: a driver hides its 1.3 core entry points (vkCmdBeginRendering)
+     * from an instance that asked for less; one that has only 1.1 still
+     * takes the request. */
+    app.apiVersion = VK_API_VERSION_1_3;
     ici.pApplicationInfo = &app;
     ici.enabledExtensionCount = niext;
     ici.ppEnabledExtensionNames = iext;
@@ -655,8 +658,9 @@ static int init_device(void)
             s_dev, core13 ? "vkCmdEndRendering" : "vkCmdEndRenderingKHR");
     }
     if (!s_legacy && (!s_begin_rendering || !s_end_rendering)) {
-        fprintf(stderr, LOGP "missing device entry points\n");
-        return 0;
+        /* Still hidden: render pass objects instead, which every device has. */
+        fprintf(stderr, LOGP "no vkCmdBeginRendering from the driver: render pass objects\n");
+        s_legacy = 1;
     }
     /* Depth32Float_Stencil8 as Metal and D3D11 keep it; else D24S8. */
     {
