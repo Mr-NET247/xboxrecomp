@@ -49,6 +49,16 @@ add_subdirectory(src/platform)
 # (recomp_env.h, RECOMP_ENV_HAVE_ENHANCE_KEYS), and defines
 # XBOXRECOMP_ENHANCE for the runtime's few seams the layer's mods use (the
 # batch filter, the input capture); OFF compiles those out.
+# The pushbuffer executor's Vulkan backend (src/d3d/nv2a_pb_vulkan.c,
+# RECOMP_PB_BACKEND=vulkan): Android and Quest, Linux, and macOS through
+# MoltenVK. Needs the Vulkan headers and loader and shaderc (the Vulkan SDK,
+# or the NDK's on Android). The define goes to every target: the executor
+# registers the backend (nv2a_pb_exec.c).
+option(XBOXRECOMP_VULKAN "Build the Vulkan pushbuffer backend" OFF)
+if(XBOXRECOMP_VULKAN)
+    add_compile_definitions(XBR_HAVE_VULKAN)
+endif()
+
 option(XBOXRECOMP_ENHANCE "Build the opt-in enhancements layer (src/enhance)" OFF)
 if(XBOXRECOMP_ENHANCE)
     target_compile_definitions(recomp_env PUBLIC RECOMP_ENV_HAVE_ENHANCE_KEYS XBOXRECOMP_ENHANCE)
