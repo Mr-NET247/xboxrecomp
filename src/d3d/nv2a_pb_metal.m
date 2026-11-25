@@ -65,6 +65,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <TargetConditionals.h>
 
 #include <math.h>
 #include <stddef.h>
@@ -663,7 +664,11 @@ static id<MTLTexture> rt_texture_new(uint32_t hw, uint32_t hh)
     /* Managed only for a discrete GPU (Intel Macs); deprecated on 27. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#if TARGET_OS_IPHONE
+    td.storageMode = MTLStorageModeShared;   /* iOS GPUs: always unified */
+#else
     td.storageMode = s_unified ? MTLStorageModeShared : MTLStorageModeManaged;
+#endif
 #pragma clang diagnostic pop
     return [s_dev newTextureWithDescriptor:td];
 }
@@ -3169,6 +3174,9 @@ static void rt_managed_sync(RenderTarget *rt)
 {
     id<MTLBlitCommandEncoder> b;
 
+#if TARGET_OS_IPHONE
+    (void)b; (void)rt;   /* no managed storage on iOS: nothing to copy back */
+#else
     if (s_unified)
         return;
     end_encoder();
@@ -3179,6 +3187,7 @@ static void rt_managed_sync(RenderTarget *rt)
     [b synchronizeResource:rt->tex];
 #pragma clang diagnostic pop
     [b endEncoding];
+#endif
 }
 
 static void rt_sync(RenderTarget *rt, uint32_t pitch)
