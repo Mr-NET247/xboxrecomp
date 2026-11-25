@@ -915,7 +915,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             const char *vp = getenv("RECOMP_VK_PRESENT");
             if (be && !strcasecmp(be, "vulkan") && !(vp && vp[0] == '0')) {
                 win = SDL_CreateWindow(window_name(), win_w, 480 * scale,
-                                       wflags | SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
+                                       wflags | SDL_WINDOW_VULKAN);
                 if (win) {
                     s_vkwin_win = win;
                     __atomic_store_n(&s_vkwin, 1, __ATOMIC_RELEASE);
