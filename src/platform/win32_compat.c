@@ -2091,7 +2091,19 @@ size_t view_take(const void *addr)
  * memfd_create for this; elsewhere an immediately-unlinked temp file does. */
 static int anon_map_fd(const char *name)
 {
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    /* iOS's sandbox refuses POSIX shared memory: a file in the app's own
+     * temporary folder, unlinked at once, maps the same way. */
+    char path[1024];
+    const char *tmp = getenv("TMPDIR");
+    int fd;
+    (void)name;
+    snprintf(path, sizeof path, "%s/xbox_map_XXXXXX", tmp && *tmp ? tmp : "/tmp");
+    fd = mkstemp(path);
+    if (fd >= 0)
+        unlink(path);
+    return fd;
+#elif defined(__APPLE__)
     static volatile LONG map_counter = 0;
     /* The pid keeps two instances apart: with a bare counter, both open
      * "/xbox_map_1" and the second O_EXCL loses. macOS caps the name at 31. */
