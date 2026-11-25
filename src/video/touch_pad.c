@@ -246,3 +246,44 @@ static void draw_controls(SDL_Renderer *ren, int w, int h, const int *down, int 
         circle(ren, ox * w + dx, oy * h + dy, 0.06f * h, knob, 1);
     }
 }
+
+int touch_pad_shapes(TouchShape *out, int max, int w, int h)
+{
+    int down[C_N] = { 0 }, c, i, n = 0;
+    float st[4] = { 0 };
+    int have = 0;
+    if (!s_on || w <= 0 || h <= 0)
+        return 0;
+    pthread_mutex_lock(&s_lock);
+    for (i = 0; i < FINGERS; i++) {
+        down[s_f[i].ctl] = 1;
+        if (s_f[i].ctl == C_STICK) {
+            st[0] = s_f[i].ox; st[1] = s_f[i].oy; st[2] = s_f[i].x; st[3] = s_f[i].y;
+            have = 1;
+        }
+    }
+    pthread_mutex_unlock(&s_lock);
+    for (c = C_A; c < C_N && n + 2 <= max; c++) {
+        const Ctl *k = &s_ctl[c];
+        TouchShape t = { k->x * w, k->y * h, k->r * h,
+                         { k->cr / 255.0f, k->cg / 255.0f, k->cb / 255.0f,
+                           down[c] ? 0.55f : 0.22f }, 1 };
+        out[n++] = t;
+        t.c[3] = 0.6f;
+        t.fill = 0;
+        out[n++] = t;
+    }
+    if (n + 2 <= max) {
+        float ox = have ? st[0] : 0.16f, oy = have ? st[1] : 0.72f;
+        float dx = have ? (st[2] - ox) * w : 0, dy = have ? (st[3] - oy) * h : 0;
+        float R = 0.12f * h, m = sqrtf(dx * dx + dy * dy);
+        TouchShape ring = { ox * w, oy * h, R, { 1, 1, 1, 0.35f }, 0 };
+        TouchShape knob = { 0, 0, 0.06f * h, { 1, 1, 1, 0.45f }, 1 };
+        if (m > R) { dx *= R / m; dy *= R / m; }
+        knob.x = ox * w + dx;
+        knob.y = oy * h + dy;
+        out[n++] = ring;
+        out[n++] = knob;
+    }
+    return n;
+}
