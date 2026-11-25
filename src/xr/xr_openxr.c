@@ -371,19 +371,13 @@ static void vk_ready(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, uint32_
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     xr_ok(xrCreateReferenceSpace(s_sess, &rs, &s_view), "view space");
     actions_init();
-    /* The swapchain's format: BGRA8 UNORM, the game's own bytes, when the
-     * runtime offers it, else RGBA8 (the blit swizzles). Not sRGB: the
-     * frame's values are already display values. */
+    /* The swapchain's format: sRGB, as the backend's frame images are
+     * tagged, so a blit between them leaves the bytes (display values) as
+     * they are; a UNORM swapchain is shown as linear light, washed out.
+     * The runtime's list is not relied on (a Quest 3 returned it
+     * interleaved with junk): the formats are tried in turn. */
     xrEnumerateSwapchainFormats(s_sess, 64, &nf, fmts);
-    sc.format = 0;
-    for (i = 0; i < nf && !sc.format; i++)
-        if (fmts[i] == VK_FORMAT_B8G8R8A8_UNORM)
-            sc.format = fmts[i];
-    for (i = 0; i < nf && !sc.format; i++)
-        if (fmts[i] == VK_FORMAT_R8G8B8A8_UNORM)
-            sc.format = fmts[i];
-    if (!sc.format && nf)
-        sc.format = fmts[0];
+    sc.format = VK_FORMAT_R8G8B8A8_SRGB;
     sc.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT;
     sc.sampleCount = 1;
     sc.width = s_sc_w;
@@ -391,8 +385,31 @@ static void vk_ready(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, uint32_
     sc.faceCount = 1;
     sc.arraySize = 1;
     sc.mipCount = 1;
-    if (!xr_ok(xrCreateSwapchain(s_sess, &sc, &s_sc), "xrCreateSwapchain"))
-        return;
+    fprintf(stderr, LOGP "%u swapchain formats:", nf);
+    for (i = 0; i < nf && i < 16; i++)
+        fprintf(stderr, " %lld", (long long)fmts[i]);
+    fprintf(stderr, "\n");
+    /* The chosen one first, then every format the runtime lists: a format
+     * it lists can still be refused for these usages. */
+    if (xrCreateSwapchain(s_sess, &sc, &s_sc) != XR_SUCCESS) {
+        /* The 8-bit four-channel formats a blit can write, in order, then
+         * whatever the runtime lists. */
+        static const int64_t want[] = { VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
+                                        VK_FORMAT_B8G8R8A8_UNORM };
+        int ok = 0;
+        for (i = 0; i < 3 && !ok; i++) {
+            sc.format = want[i];
+            ok = xrCreateSwapchain(s_sess, &sc, &s_sc) == XR_SUCCESS;
+        }
+        for (i = 0; i < nf && !ok; i++) {
+            sc.format = fmts[i];
+            ok = xrCreateSwapchain(s_sess, &sc, &s_sc) == XR_SUCCESS;
+        }
+        if (!ok) {
+            fprintf(stderr, LOGP "no swapchain format works\n");
+            return;
+        }
+    }
     for (i = 0; i < 8; i++) {
         imgs[i].type = XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR;
         imgs[i].next = NULL;
@@ -552,7 +569,10 @@ static void *frame_thread(void *arg)
             XrSwapchainImageWaitInfo wi2 = { XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
             XrSwapchainImageReleaseInfo ri = { XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
             uint32_t idx = 0;
-            int st = s_inworld && s_sc2;   /* the stereo pair */
+            /* In-world (the stereo pair) only in an event; the menus stay
+             * on the fixed screen whatever the mode. */
+            int inw = s_inworld && nv2a_vk_in_event();
+            int st = inw && s_sc2;
             XrSwapchain sw = st ? s_sc2 : s_sc;
             nv2a_vk_queue_lock();
             xrAcquireSwapchainImage(sw, &ai, &idx);
@@ -567,16 +587,16 @@ static void *frame_thread(void *arg)
              * the head was at the last recenter. In-world (interim): locked
              * to the head and wide, about 100 degrees across. */
             quad.layerFlags = 0;
-            quad.space = s_inworld && s_view ? s_view : s_space;
+            quad.space = inw && s_view ? s_view : s_space;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = s_sc;
             quad.subImage.imageRect.extent.width = (int32_t)s_sc_w;
             quad.subImage.imageRect.extent.height = (int32_t)s_sc_h;
             quad.pose.orientation.w = 1.0f;
             quad.pose.position.z = -2.2f;
-            quad.size.width = s_inworld ? 2.4f : 3.0f;
-            quad.size.height = s_inworld ? 1.8f : 2.25f;
-            if (s_inworld)
+            quad.size.width = inw ? 2.4f : 3.0f;
+            quad.size.height = inw ? 1.8f : 2.25f;
+            if (inw)
                 quad.pose.position.z = -1.0f;
             layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
             ei.layerCount = 1;

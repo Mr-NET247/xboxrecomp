@@ -3374,6 +3374,34 @@ static void occ_after_wait(void)
 static uint32_t s_shown_w, s_shown_h;
 static uint64_t s_window_presents;
 
+/* In an event, not a menu (nv2a_vk_in_event): Burnout 3's races draw
+ * 650-1250 depth-tested batches a frame, its menus 0-300. On above 500,
+ * off below 300, each held 30 flips, so neither a busy menu nor a quiet
+ * moment of a race flips it. */
+static int s_in_event;
+
+int nv2a_vk_in_event(void) { return __atomic_load_n(&s_in_event, __ATOMIC_RELAXED); }
+
+static void event_track(void)
+{
+    static uint64_t last_z;
+    static int run;
+    uint64_t z = s_draws_z - last_z;
+    int want = s_in_event ? z >= 300 : z > 500;
+    last_z = s_draws_z;
+    if (want == s_in_event) {
+        run = 0;
+        return;
+    }
+    if (++run >= 30) {
+        run = 0;
+        __atomic_store_n(&s_in_event, want, __ATOMIC_RELAXED);
+        fprintf(stderr, LOGP "%s (%llu depth draws a frame), flip %llu\n",
+                want ? "in an event" : "in the menus", (unsigned long long)z,
+                (unsigned long long)s_presents);
+    }
+}
+
 /* The VR runtime's copy of the latest frame (nv2a_vk_frame). */
 static Img      s_xr_img;
 static uint64_t s_xr_gen;
@@ -3426,14 +3454,15 @@ static VkDescriptorPool s_st_pool;
 static VkDescriptorSet s_st_set;
 static VkSampler s_st_smp;
 static Img      s_xr_sbs;        /* RGBA8, 2w x h: left | right */
+static Img      s_xr_sbs_srgb;   /* its bytes, tagged sRGB (see xr_frame_copy) */
 static uint64_t s_xr_sbs_gen;
 static float    s_st_s = -1.0f, s_st_c = 0.98f;
 
 int nv2a_vk_frame_stereo(VkImage *img, uint32_t *w, uint32_t *h, uint64_t *gen)
 {
-    if (!s_xr_sbs.img || !s_xr_sbs_gen)
+    if (!s_xr_sbs_srgb.img || !s_xr_sbs_gen)
         return 0;
-    *img = s_xr_sbs.img;
+    *img = s_xr_sbs_srgb.img;
     *w = s_xr_sbs.w;
     *h = s_xr_sbs.h;
     *gen = s_xr_sbs_gen;
@@ -3538,6 +3567,7 @@ static void stereo_pass(RenderTarget *rt, uint32_t w, uint32_t h)
             vkQueueWaitIdle(s_queue);
             nv2a_vk_queue_unlock();
             img_destroy_now(&s_xr_sbs);
+            img_destroy_now(&s_xr_sbs_srgb);
         }
         if (!img_make(&s_xr_sbs, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D,
                       VK_FORMAT_R8G8B8A8_UNORM, 2u * w, h, 1, 1, 1,
@@ -3545,6 +3575,15 @@ static void stereo_pass(RenderTarget *rt, uint32_t w, uint32_t h)
                       VK_IMAGE_ASPECT_COLOR_BIT))
             return;
         img_layout(up_cmd(), &s_xr_sbs, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        if (!img_make(&s_xr_sbs_srgb, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D,
+                      VK_FORMAT_R8G8B8A8_SRGB, 2u * w, h, 1, 1, 1,
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT)) {
+            img_destroy_now(&s_xr_sbs);
+            return;
+        }
+        img_layout(up_cmd(), &s_xr_sbs_srgb, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_GENERAL);
     }
     memset(ii, 0, sizeof ii);
     memset(wr, 0, sizeof wr);
@@ -3576,6 +3615,7 @@ static void stereo_pass(RenderTarget *rt, uint32_t w, uint32_t h)
     vkCmdPushConstants(s_cur->cmd, s_st_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
     vkCmdDispatch(s_cur->cmd, (2u * w + 7u) / 8u, (h + 7u) / 8u, 1);
     barrier_all(s_cur->cmd);
+    copy_image(&s_xr_sbs, 0, 0, &s_xr_sbs_srgb, 0, 0, 2u * w, h);
 }
 
 /* At the flip, before its wait: the frame's host pixels into s_xr_img. */
@@ -3592,10 +3632,17 @@ static void xr_frame_copy(RenderTarget *rt, uint32_t w, uint32_t h)
             nv2a_vk_queue_unlock();
             img_destroy_now(&s_xr_img);
         }
-        if (!rt_image_new(&s_xr_img, w, h)) {
+        /* sRGB-tagged: the runtime then shows the bytes as they are
+         * (display values), where a UNORM image is taken as linear light
+         * and comes out washed out. The copy moves the bytes unchanged. */
+        if (!img_make(&s_xr_img, VK_IMAGE_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D,
+                      VK_FORMAT_B8G8R8A8_SRGB, w, h, 1, 1, 1,
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT)) {
             nv2a_vk_frame_unlock();
             return;
         }
+        img_layout(up_cmd(), &s_xr_img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
     }
     copy_image(&rt->tex, 0, 0, &s_xr_img, 0, 0, w, h);
     stereo_pass(rt, w, h);
@@ -3712,6 +3759,8 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
         }
     }
     s_presents++;
+    if (xr_on())
+        event_track();
     if (s_presents == 1 || (s_presents % 300) == 0)
         fprintf(stderr, LOGP "present #%llu: surface 0x%08X (%s), %llu clears, %llu draws"
                 " (%llu vertex-program), %llu skipped, %llu culled, %llu texture uploads,"
