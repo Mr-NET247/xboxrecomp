@@ -139,6 +139,11 @@ static int device_event(const SDL_Event *ev)
     }
 }
 
+int touch_pad_visible(void)
+{
+    return shown();
+}
+
 static int touch_ext_pad(XBOX_INPUT_STATE *st)
 {
     static DWORD packet;

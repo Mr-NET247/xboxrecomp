@@ -54,6 +54,7 @@
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_metal.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,7 @@
 #endif
 #include "fb_present_metal.h"
 #include "metal_compile.h"
+#include "touch_pad.h"
 
 #if __has_feature(objc_arc)
 #error "fb_present_metal.m is manual retain/release: build it without -fobjc-arc"
@@ -78,6 +80,11 @@ static id<MTLDevice>               s_dev;
 static id<MTLCommandQueue>         s_queue;
 static id<MTLRenderPipelineState>  s_pso;
 static id<MTLRenderPipelineState>  s_pso_crop; /* display.overscan > 0 */
+static id<MTLRenderPipelineState>  s_pso_touch;/* on-screen controls: coloured triangles */
+#define TOUCH_BUFS 3                            /* one per drawable in flight */
+#define TOUCH_VTX  8192
+static id<MTLBuffer>               s_touch_vb[TOUCH_BUFS];
+static int                         s_touch_cur;
 static id<MTLSamplerState>         s_smp[2];   /* nearest, linear */
 static SDL_MetalView               s_view;
 static CAMetalLayer               *s_layer;
@@ -160,7 +167,20 @@ static const char s_blit_msl[] =
     "fragment float4 fs_ovl(OO i [[stage_in]], texture2d<float> t [[texture(0)]],\n"
     "                       sampler s [[sampler(0)]]) {\n"
     "    return t.sample(s, i.t) * i.c;\n"
-    "}\n";
+    "}\n"
+    /* The on-screen controls (touch_pad.c): triangles in drawable pixels,
+     * colour with straight alpha. sz is the drawable's size. */
+    "struct TV { packed_float2 p; packed_float4 c; };\n"
+    "struct TO { float4 p [[position]]; float4 c; };\n"
+    "vertex TO vs_touch(uint i [[vertex_id]], const device TV *v [[buffer(0)]],\n"
+    "                   constant float2 &sz [[buffer(1)]]) {\n"
+    "    TO o;\n"
+    "    float2 q = float2(v[i].p) / sz;\n"
+    "    o.p = float4(q.x * 2 - 1, 1 - q.y * 2, 0, 1);\n"
+    "    o.c = float4(v[i].c);\n"
+    "    return o;\n"
+    "}\n"
+    "fragment float4 fs_touch(TO i [[stage_in]]) { return i.c; }\n";
 
 static int fail(char *err, size_t n, const char *what)
 {
@@ -198,6 +218,21 @@ int fbm_create(SDL_Window *win, int vsync, int shots, char *err, size_t errn)
         s_pso = [s_dev newRenderPipelineStateWithDescriptor:pd error:&e];
         pd.vertexFunction = [[lib newFunctionWithName:@"vs_crop"] autorelease];
         s_pso_crop = [s_dev newRenderPipelineStateWithDescriptor:pd error:&e];
+        {
+            MTLRenderPipelineDescriptor *tp = [[MTLRenderPipelineDescriptor alloc] init];
+            tp.vertexFunction = [[lib newFunctionWithName:@"vs_touch"] autorelease];
+            tp.fragmentFunction = [[lib newFunctionWithName:@"fs_touch"] autorelease];
+            tp.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+            tp.colorAttachments[0].blendingEnabled = YES;
+            tp.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+            tp.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+            tp.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            tp.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+            s_pso_touch = [s_dev newRenderPipelineStateWithDescriptor:tp error:&e];
+            [tp release];
+            if (!s_pso_touch)
+                fprintf(stderr, "[PRESENT] touch pipeline failed; no on-screen controls drawn\n");
+        }
 #ifdef XBOXRECOMP_ENHANCE
         pd.vertexFunction = [[lib newFunctionWithName:@"vs_blit"] autorelease];
         pd.fragmentFunction = [[lib newFunctionWithName:@"fs_lines"] autorelease];
@@ -311,6 +346,12 @@ void fbm_destroy(void)
         s_pso = nil;
         [s_pso_crop release];
         s_pso_crop = nil;
+        [s_pso_touch release];
+        s_pso_touch = nil;
+        for (k = 0; k < TOUCH_BUFS; k++) {
+            [s_touch_vb[k] release];
+            s_touch_vb[k] = nil;
+        }
 #ifdef XBOXRECOMP_ENHANCE
         chain_free();
         [s_pso_lines release];
@@ -707,6 +748,65 @@ static libra_mtl_filter_chain_t chain_get(void)
 }
 #endif /* XBOXRECOMP_ENHANCE */
 
+/* The on-screen controls over everything else, in drawable pixels: each
+ * shape a fan of triangles (fill) or a ring of them (outline). */
+static void touch_draw(id<MTLRenderCommandEncoder> enc, int dw, int dh)
+{
+    enum { SEG = 32 };
+    struct tv { float p[2]; float c[4]; } *v;
+    TouchShape sh[32];
+    int ns, i, s, nv = 0;
+    float lw = dh * 0.004f, sz[2] = { (float)dw, (float)dh };
+    id<MTLBuffer> b;
+
+    if (!s_pso_touch || dw <= 0 || dh <= 0)
+        return;
+    ns = touch_pad_shapes(sh, 32, dw, dh);
+    if (!ns)
+        return;
+    s_touch_cur = (s_touch_cur + 1) % TOUCH_BUFS;
+    if (!s_touch_vb[s_touch_cur])
+        s_touch_vb[s_touch_cur] = [s_dev newBufferWithLength:TOUCH_VTX * sizeof *v
+                                                     options:MTLResourceStorageModeShared];
+    b = s_touch_vb[s_touch_cur];
+    if (!b)
+        return;
+    v = (struct tv *)[b contents];
+    if (lw < 2.0f)
+        lw = 2.0f;
+#define TV_PUT(X, Y, S) do { v[nv].p[0] = (X); v[nv].p[1] = (Y); \
+        memcpy(v[nv].c, (S)->c, sizeof v[nv].c); nv++; } while (0)
+    for (s = 0; s < ns && nv + SEG * 6 <= TOUCH_VTX; s++) {
+        const TouchShape *t = &sh[s];
+        float ri = t->r - lw;
+        if (ri < 0)
+            ri = 0;
+        for (i = 0; i < SEG; i++) {
+            float a0 = (float)i * 6.2831853f / SEG, a1 = (float)(i + 1) * 6.2831853f / SEG;
+            float c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
+            if (t->fill) {
+                TV_PUT(t->x, t->y, t);
+                TV_PUT(t->x + t->r * c0, t->y + t->r * s0, t);
+                TV_PUT(t->x + t->r * c1, t->y + t->r * s1, t);
+            } else {
+                TV_PUT(t->x + ri * c0, t->y + ri * s0, t);
+                TV_PUT(t->x + t->r * c0, t->y + t->r * s0, t);
+                TV_PUT(t->x + t->r * c1, t->y + t->r * s1, t);
+                TV_PUT(t->x + ri * c0, t->y + ri * s0, t);
+                TV_PUT(t->x + t->r * c1, t->y + t->r * s1, t);
+                TV_PUT(t->x + ri * c1, t->y + ri * s1, t);
+            }
+        }
+    }
+#undef TV_PUT
+    [enc setViewport:(MTLViewport){ 0, 0, (double)dw, (double)dh, 0, 1 }];
+    [enc setScissorRect:(MTLScissorRect){ 0, 0, (NSUInteger)dw, (NSUInteger)dh }];
+    [enc setRenderPipelineState:s_pso_touch];
+    [enc setVertexBuffer:b offset:0 atIndex:0];
+    [enc setVertexBytes:sz length:sizeof sz atIndex:1];
+    [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:(NSUInteger)nv];
+}
+
 int fbm_present(SDL_Window *win, int k, uint32_t fw, uint32_t fh, unsigned n,
                 uint32_t pad, int filter, const char *shot_path, uint32_t flip,
                 const struct nv2a_ovl_list *const *layers, int nlayers)
@@ -748,6 +848,10 @@ int fbm_present(SDL_Window *win, int k, uint32_t fw, uint32_t fh, unsigned n,
         }
 #endif
 
+        /* The controls are placed in window pixels, where the fingers are:
+         * while they show, the drawable is the window. */
+        if (internal && touch_pad_visible())
+            internal = 0;
         /* Checked every present, not only on resize events: a move between
          * displays of another scale need not arrive as SIZE_CHANGED. Under
          * present.surface=internal the drawable is the frame instead (a
@@ -920,6 +1024,7 @@ int fbm_present(SDL_Window *win, int k, uint32_t fw, uint32_t fh, unsigned n,
         (void)layers;
         (void)nlayers;
 #endif
+        touch_draw(enc, dw, dh);
         [enc endEncoding];
         if (shot_path) {
             shot = [s_dev newBufferWithLength:(NSUInteger)dw * dh * 4
