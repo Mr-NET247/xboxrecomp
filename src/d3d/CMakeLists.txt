@@ -94,6 +94,32 @@ else()
     endif()
 endif()
 
+if(XBOXRECOMP_VULKAN)
+    # The Vulkan backend and its GLSL emitters (d3d8_glsl.h). Shaders are
+    # compiled to SPIR-V at run time with shaderc: the SDK's
+    # shaderc_combined, or a SHADERC_LIB / SHADERC_INCLUDE_DIR given (the
+    # NDK's prebuilt on Android).
+    target_sources(xbox_d3d8 PRIVATE nv2a_pb_vulkan.c d3d8_vsh_glsl.c d3d8_combiners_glsl.c)
+    set_source_files_properties(nv2a_pb_vulkan.c PROPERTIES
+        COMPILE_OPTIONS "-Wno-missing-field-initializers")
+    target_include_directories(xbox_d3d8 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../kernel ${CMAKE_CURRENT_SOURCE_DIR}/..)
+    if(SHADERC_LIB)
+        find_package(Vulkan REQUIRED)
+        target_include_directories(xbox_d3d8 PRIVATE ${SHADERC_INCLUDE_DIR})
+        target_link_libraries(xbox_d3d8 PUBLIC Vulkan::Vulkan ${SHADERC_LIB})
+    else()
+        find_package(Vulkan REQUIRED COMPONENTS shaderc_combined)
+        target_link_libraries(xbox_d3d8 PUBLIC Vulkan::Vulkan Vulkan::shaderc_combined)
+    endif()
+    # shaderc is C++ inside.
+    if(APPLE)
+        target_link_libraries(xbox_d3d8 PUBLIC c++)
+    elseif(NOT ANDROID)
+        target_link_libraries(xbox_d3d8 PUBLIC stdc++)
+    endif()
+endif()
+
 target_include_directories(xbox_d3d8 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The CPU rasteriser's texture cache, driven by a synthetic stream (POSIX:
