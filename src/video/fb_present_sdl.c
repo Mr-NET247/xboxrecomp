@@ -67,6 +67,7 @@
  */
 #if !defined(_WIN32)
 
+#include "touch_pad.h"
 #include <SDL3/SDL.h>
 #include "recomp_env.h"
 #include "recomp_exit_hook.h"
@@ -961,6 +962,7 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         return guest_main();
     }
 
+    touch_pad_init();
     t_start = t_stat = now_ns(CLOCK_MONOTONIC);
     cpu_start = cpu_stat = now_ns(CLOCK_THREAD_CPUTIME_ID);
 
@@ -981,6 +983,13 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 xbox_InputSdlEvent(&ev);
                 xbox_InputSdlMouseEvent(&ev);
                 xbox_InputSdlTextEvent(&ev);
+                {
+                    int tw = 0, th = 0;
+                    /* the whole window, not the logical frame */
+                    SDL_GetRenderOutputSize(ren, &tw, &th);
+                    if (touch_pad_event(&ev, tw, th))
+                        dirty = 1;
+                }
                 if (ev.type == SDL_EVENT_QUIT)
                     quit = 1;
                 else if (ev.type == s_guest_done_event)
@@ -1172,6 +1181,11 @@ int xbox_HostWindowMain(int (*guest_main)(void))
                 ovl_draw(ren, &pl);
             }
 #endif
+            {
+                int tw = 0, th = 0;
+                SDL_GetRenderOutputSize(ren, &tw, &th);
+                touch_pad_draw(ren, tw, th);
+            }
             if (shoot) {
                 shoot = 0;
                 shot_save(ren, shown_flip);

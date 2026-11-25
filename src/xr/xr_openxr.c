@@ -682,6 +682,7 @@ int xbox_XrInit(void)
     }
     nv2a_pb_vulkan_set_xr(&s_vk);
     xbox_InputSetExtPad(ext_pad);
+    setenv("RECOMP_TOUCH", "0", 1);   /* the controllers, not a touch screen */
     fprintf(stderr, LOGP "OpenXR up: immersive mode, motion controllers as player 1\n");
     return 1;
 }
