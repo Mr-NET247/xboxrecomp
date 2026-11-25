@@ -2843,7 +2843,8 @@ uint32_t g_xbox_code_hi = 0;
 /* The register set, per thread (recomp_tls_regs.h): every name below
  * (g_eax, g_fs_base, g_mm0, ...) is a field of one of these. The initial
  * values are the ones each register had as its own variable. */
-RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
+RECOMP_TLS RecompTlsDRegs g_dregs;
+RECOMP_TLS uint32_t g_esp, g_ebp;
 RECOMP_TLS uint32_t g_fs_base = XBOX_TIB_MAIN, g_seh_ebp, g_eflags = 0x00000202u,
                     g_mxcsr = 0x1F80u;
 RECOMP_TLS int g_df, g_fp_top, g_fp_cmp;

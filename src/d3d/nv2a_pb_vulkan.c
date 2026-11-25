@@ -114,6 +114,7 @@ static const struct nv2a_vk_xr *s_xr;
 SDL_Window *xbox_FramebufferWindowVulkan(void);
 static SDL_Window  *s_win;
 static VkSurfaceKHR s_surf;
+static int          s_have_swapchain;   /* VK_KHR_swapchain on the device */
 /* The stereo pass without a headset (RECOMP_XR_STEREO set): a test of it on
  * a desktop, its pairs in the host dumps (metal_host_dump). */
 static int xr_on(void)
@@ -626,10 +627,10 @@ static int init_device(void)
         fprintf(stderr, LOGP "no Vulkan instance\n");
         return 0;
     }
-    if (s_win && !SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf)) {
-        fprintf(stderr, LOGP "no window surface (%s): present by readback\n", SDL_GetError());
+    /* The surface now if Android has the window ready, else at a later
+     * flip (sw_surface): the guest can start before the activity shows. */
+    if (s_win && !SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf))
         s_surf = VK_NULL_HANDLE;
-    }
     n = 16;
     if (vkEnumeratePhysicalDevices(s_inst, &n, pd) < 0 || !n) {
         fprintf(stderr, LOGP "no Vulkan device\n");
@@ -677,15 +678,18 @@ static int init_device(void)
         if (has_ext(de, nde, "VK_KHR_create_renderpass2"))
             dext[ndext++] = "VK_KHR_create_renderpass2";
     }
-    if (s_surf) {
-        VkBool32 ok = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(s_pdev, s_qfam, s_surf, &ok);
-        if (ok && has_ext(de, nde, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+    if (s_win && has_ext(de, nde, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        VkBool32 ok = VK_TRUE;
+        if (s_surf)
+            vkGetPhysicalDeviceSurfaceSupportKHR(s_pdev, s_qfam, s_surf, &ok);
+        if (ok) {
             dext[ndext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
-        } else {
-            vkDestroySurfaceKHR(s_inst, s_surf, NULL);
-            s_surf = VK_NULL_HANDLE;
+            s_have_swapchain = 1;
         }
+    }
+    if (s_surf && !s_have_swapchain) {
+        vkDestroySurfaceKHR(s_inst, s_surf, NULL);
+        s_surf = VK_NULL_HANDLE;
     }
     if (has_ext(de, nde, "VK_KHR_portability_subset"))
         dext[ndext++] = "VK_KHR_portability_subset";
@@ -851,8 +855,10 @@ static int init(void)
         fprintf(stderr, LOGP "initialisation failed: staying on the CPU rasteriser\n");
         return 0;
     }
-    fprintf(stderr, LOGP "window surface: %s\n", s_surf ? "yes, swapchain present"
-                                                      : "no, present by readback");
+    fprintf(stderr, LOGP "window surface: %s\n",
+            s_surf ? "yes, swapchain present"
+            : s_have_swapchain ? "not ready yet, made at a later flip"
+            : "no, present by readback");
     fprintf(stderr, LOGP "device up: %s (Vulkan %u.%u.%u), depth %s, BC %d, aniso %d,"
             " precise occlusion %d, push descriptors %d, %s; present by readback, write-back"
             " on demand\n",
@@ -4080,8 +4086,31 @@ static int sw_present(RenderTarget *rt, uint32_t hcw, uint32_t hch)
     int nsh, i;
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 
-    if (!s_surf || !rt || !hcw || !hch)
+    if (!rt || !hcw || !hch || !s_have_swapchain)
         return 0;
+    if (!s_surf) {
+        /* the window was not ready at init (or was taken away): try again
+         * every 10 flips */
+        VkBool32 ok = VK_FALSE;
+        if (s_sw_retry && s_presents < s_sw_retry)
+            return 0;
+        s_sw_retry = s_presents + 10;
+        if (!SDL_Vulkan_CreateSurface(s_win, s_inst, NULL, &s_surf)) {
+            s_surf = VK_NULL_HANDLE;
+            return 0;
+        }
+        vkGetPhysicalDeviceSurfaceSupportKHR(s_pdev, s_qfam, s_surf, &ok);
+        if (!ok) {
+            vkDestroySurfaceKHR(s_inst, s_surf, NULL);
+            s_surf = VK_NULL_HANDLE;
+            s_have_swapchain = 0;
+            fprintf(stderr, LOGP "the queue cannot present to the window: readback\n");
+            return 0;
+        }
+        fprintf(stderr, LOGP "window surface made at flip %llu\n",
+                (unsigned long long)s_presents);
+        s_sw_retry = 0;
+    }
     if (!s_swap) {
         if (s_sw_retry && s_presents < s_sw_retry)
             return 0;
@@ -4218,7 +4247,7 @@ static void vk_flip(uint32_t surface_offset, uint32_t pitch)
         wb = rt && addr && pitch && pitch >= rt->w * 2u && always;
         /* The window's swapchain: the frame goes from the GPU to the screen,
          * and the flip waits for nothing (no readback, no flush(1)). */
-        if (rt && s_surf && !wb && !host_dump_due() && sw_present(rt, hcw, hch)) {
+        if (rt && s_have_swapchain && !wb && !host_dump_due() && sw_present(rt, hcw, hch)) {
             occ_settle(1);
             s_presents++;
             if (s_xr && s_xr_img.img)
