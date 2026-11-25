@@ -37,7 +37,14 @@
 #include <sys/sysctl.h>
 #include <sys/stat.h>
 #include <mach/mach.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+/* iOS's SDK withholds mach_vm.h; vm_map (vm_map.h) is the same call with
+ * vm_address_t, which is 64 bits on every iOS ABI. */
+#include <mach/vm_map.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #else
 #include <sys/sysinfo.h>
 #endif
@@ -1531,15 +1538,24 @@ size_t view_take(const void *addr);
  */
 static void *mach_map_fixed(void *address, size_t size, int prot)
 {
+#if TARGET_OS_IPHONE
+    vm_address_t addr = (vm_address_t)(uintptr_t)address;
+    vm_size_t len = (size + vm_page_size - 1) & ~((vm_size_t)vm_page_size - 1);
+#else
     mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)address;
     mach_vm_size_t len = (size + vm_page_size - 1) & ~((mach_vm_size_t)vm_page_size - 1);
+#endif
     vm_prot_t vmprot = VM_PROT_NONE;
 
     if (prot & PROT_READ)  vmprot |= VM_PROT_READ;
     if (prot & PROT_WRITE) vmprot |= VM_PROT_WRITE;
     if (prot & PROT_EXEC)  vmprot |= VM_PROT_EXECUTE;
 
+#if TARGET_OS_IPHONE
+    kern_return_t kr = vm_map(
+#else
     kern_return_t kr = mach_vm_map(
+#endif
         mach_task_self(),
         &addr,
         len,

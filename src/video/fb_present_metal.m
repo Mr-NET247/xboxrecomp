@@ -44,7 +44,10 @@
  */
 #if defined(__APPLE__)
 
+#include <TargetConditionals.h>
+#if !TARGET_OS_IPHONE
 #import <AppKit/AppKit.h>
+#endif
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -241,7 +244,11 @@ int fbm_create(SDL_Window *win, int vsync, int shots, char *err, size_t errn)
             CGColorSpaceRelease(cs);
         }
         s_layer.framebufferOnly = shots ? NO : YES;
+#if !TARGET_OS_IPHONE
         s_layer.displaySyncEnabled = vsync ? YES : NO;
+#else
+        (void)vsync;   /* a UIKit CAMetalLayer always presents on the display's sync */
+#endif
         s_layer.maximumDrawableCount = 3;
         s_layer.allowsNextDrawableTimeout = YES;
         s_internal = nv2a_host_opts()->present_surface == NV2A_PRESENT_SURFACE_INTERNAL;
@@ -355,7 +362,11 @@ void *fbm_slot(int k, uint32_t w, uint32_t h)
              * Managed on a discrete GPU, as the backend's targets. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#if TARGET_OS_IPHONE
+            td.storageMode = MTLStorageModeShared;
+#else
             td.storageMode = s_unified ? MTLStorageModeShared : MTLStorageModeManaged;
+#endif
 #pragma clang diagnostic pop
             [s_slot[k] release];
             s_slot[k] = [s_dev newTextureWithDescriptor:td];
@@ -940,6 +951,10 @@ int fbm_present(SDL_Window *win, int k, uint32_t fw, uint32_t fh, unsigned n,
 
 int fbm_window_level(SDL_Window *win, int top)
 {
+#if TARGET_OS_IPHONE
+    (void)win; (void)top;   /* a UIKit window is always the whole screen */
+    return 0;
+#else
     NSWindow *w = (NSWindow *)SDL_GetPointerProperty(SDL_GetWindowProperties(win),
                                                      SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL);
     NSWindowLevel want = top ? kCGMainMenuWindowLevel + 1 : NSNormalWindowLevel;
@@ -948,6 +963,7 @@ int fbm_window_level(SDL_Window *win, int top)
         return 0;
     [w setLevel:want];
     return 1;
+#endif
 }
 
 #endif /* __APPLE__ */

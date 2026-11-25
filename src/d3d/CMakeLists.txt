@@ -47,8 +47,15 @@ if(WIN32)
     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../tests/d3d11_backend_smoke
                      ${CMAKE_CURRENT_BINARY_DIR}/d3d11_backend_smoke)
 else()
+    # iOS has no OpenGL: d3d8_none.c stands in for the GL device, which the
+    # pushbuffer path (the Metal backend) never uses.
+    if(IOS)
+        set(_xbox_d3d8_device d3d8_none.c)
+    else()
+        set(_xbox_d3d8_device d3d8_gl.c)
+    endif()
     add_library(xbox_d3d8 STATIC
-        d3d8_gl.c
+        ${_xbox_d3d8_device}
         d3d8_vsh_parse.c
         d3d8_combiners_parse.c
         d3d8_vsh_hlsl.c
@@ -58,8 +65,10 @@ else()
         shader_cache.c
     )
     find_package(SDL3 3.2 CONFIG REQUIRED)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(EPOXY REQUIRED epoxy)
+    if(NOT IOS)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(EPOXY REQUIRED epoxy)
+    endif()
     target_include_directories(xbox_d3d8 PRIVATE ${EPOXY_INCLUDE_DIRS})
     # EPOXY_LINK_LIBRARIES, not EPOXY_LIBRARIES: the latter is the bare name
     # `epoxy`, which only resolves if EPOXY_LIBRARY_DIRS happens to be on the
