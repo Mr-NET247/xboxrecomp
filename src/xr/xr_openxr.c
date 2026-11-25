@@ -12,8 +12,15 @@
  * The motion controllers become player 1's Duke pad (xbox_InputSetExtPad):
  *   left / right thumbstick  left / right stick      triggers   LT / RT
  *   A B X Y                  A B X Y                 grips      white / black
- *   menu (left)              START                   stick clicks  BACK / right thumb
- * Burnout 3's accelerate and brake are the triggers, boost A, as on a pad.
+ *   menu (left)              START                   left stick click  BACK
+ * Burnout 3's accelerate and brake are the triggers, boost A, X looks
+ * behind, Y cycles the race camera, as on a pad.
+ *
+ * The right stick click is the camera button, not the game's: a short tap
+ * cycles Burnout's camera (a Y tap), a long press (XR_LONG_NS) switches
+ * between external mode (the screen fixed in the room, where the
+ * headset's recenter puts it) and in-world mode (for now a wide screen
+ * locked to the head; per-eye stereo from the car is to come).
  */
 #if defined(XBR_HAVE_OPENXR) && defined(__ANDROID__)
 
@@ -76,6 +83,19 @@ static XrAction s_act[A_N];
 static XrPath   s_hand[2];
 static pthread_mutex_t s_padlock = PTHREAD_MUTEX_INITIALIZER;
 static XBOX_INPUT_STATE s_pad;
+#define XR_LONG_NS 600000000ll    /* a long press of the camera button */
+#define XR_TAP_NS  150000000ll    /* the Y tap it sends */
+static int64_t s_cam_down, s_y_until;   /* press start, end of the Y tap */
+static int     s_cam_held_long;
+static int     s_inworld;             /* 0 external, 1 in-world */
+static XrSpace s_view;                /* head-locked space, in-world mode */
+
+static int64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+}
 static int s_pad_live;
 
 static int ext_pad(XBOX_INPUT_STATE *st)
@@ -237,8 +257,27 @@ static void actions_sync(void)
         p.Gamepad.wButtons |= XBOX_GAMEPAD_START;
     if (get_b(A_CLICK_L))
         p.Gamepad.wButtons |= XBOX_GAMEPAD_BACK;
-    if (get_b(A_CLICK_R))
-        p.Gamepad.wButtons |= XBOX_GAMEPAD_RIGHT_THUMB;
+    /* The camera button: a tap is the game's Y (its camera), a hold
+     * switches mode once per press. */
+    {
+        int64_t t = now_ns();
+        if (get_b(A_CLICK_R)) {
+            if (!s_cam_down)
+                s_cam_down = t;
+            else if (!s_cam_held_long && t - s_cam_down >= XR_LONG_NS) {
+                s_cam_held_long = 1;
+                s_inworld = !s_inworld;
+                fprintf(stderr, LOGP "%s mode\n", s_inworld ? "in-world" : "external");
+            }
+        } else if (s_cam_down) {
+            if (!s_cam_held_long)
+                s_y_until = t + XR_TAP_NS;
+            s_cam_down = 0;
+            s_cam_held_long = 0;
+        }
+        if (t < s_y_until)
+            p.Gamepad.bAnalogButtons[XBOX_BUTTON_Y] = 255;
+    }
     /* The left stick's direction as the d-pad too: menus move on either. */
     if (l.y > 0.7f)  p.Gamepad.wButtons |= XBOX_GAMEPAD_DPAD_UP;
     if (l.y < -0.7f) p.Gamepad.wButtons |= XBOX_GAMEPAD_DPAD_DOWN;
@@ -328,6 +367,8 @@ static void vk_ready(VkInstance inst, VkPhysicalDevice pd, VkDevice dev, uint32_
     rs.poseInReferenceSpace.orientation.w = 1.0f;
     if (!xr_ok(xrCreateReferenceSpace(s_sess, &rs, &s_space), "xrCreateReferenceSpace"))
         return;
+    rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    xr_ok(xrCreateReferenceSpace(s_sess, &rs, &s_view), "view space");
     actions_init();
     /* The swapchain's format: BGRA8 UNORM, the game's own bytes, when the
      * runtime offers it, else RGBA8 (the blit swizzles). Not sRGB: the
@@ -505,17 +546,21 @@ static void *frame_thread(void *arg)
             nv2a_vk_queue_lock();
             xrReleaseSwapchainImage(s_sc, &ri);
             nv2a_vk_queue_unlock();
-            /* A 3 m by 2.25 m screen (4:3), 2.2 m ahead at eye height. */
+            /* External: a 3 m by 2.25 m screen (4:3), 2.2 m ahead of where
+             * the head was at the last recenter. In-world (interim): locked
+             * to the head and wide, about 100 degrees across. */
             quad.layerFlags = 0;
-            quad.space = s_space;
+            quad.space = s_inworld && s_view ? s_view : s_space;
             quad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
             quad.subImage.swapchain = s_sc;
             quad.subImage.imageRect.extent.width = (int32_t)s_sc_w;
             quad.subImage.imageRect.extent.height = (int32_t)s_sc_h;
             quad.pose.orientation.w = 1.0f;
             quad.pose.position.z = -2.2f;
-            quad.size.width = 3.0f;
-            quad.size.height = 2.25f;
+            quad.size.width = s_inworld ? 2.4f : 3.0f;
+            quad.size.height = s_inworld ? 1.8f : 2.25f;
+            if (s_inworld)
+                quad.pose.position.z = -1.0f;
             layers[0] = (const XrCompositionLayerBaseHeader *)&quad;
             ei.layerCount = 1;
             ei.layers = layers;
