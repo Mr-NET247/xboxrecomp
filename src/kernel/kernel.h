@@ -667,6 +667,11 @@ int xbox_path_tree(const char *xbox_path);
 /* 1 with the rest below the root when a guest path lands in the cache
  * partition (<hdd>/Cache), 2 for a bare Partition3-5 device, else 0. */
 int xbox_path_cache_rest(const char *xbox_path, char *out, size_t n);
+/* Whether a guest path lands in the game files tree, for the disc image
+ * (kernel_disc.c): 1 with the rest below the root for the disc itself
+ * (D:, CdRom0), 3 for the rest of the game tree (E:, C:, Y:, Partition1-2),
+ * 2 for the bare CdRom0 device, else 0. */
+int xbox_path_game_rest(const char *xbox_path, char *out, size_t n);
 
 /* 1 when the directory holding host_path exists (kernel_file.c, per backend). */
 int xbox_host_parent_exists(const xbox_host_char *host_path);

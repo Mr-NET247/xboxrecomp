@@ -437,6 +437,64 @@ int xbox_path_cache_rest(const char *xbox_path, char *out, size_t n)
     return 0;
 }
 
+/*
+ * Whether a guest path lands in the game files tree, for the disc image
+ * (kernel_disc.c). The same links and rules as xbox_translate_path, so the
+ * image serves exactly the paths that would go to <game_dir>.
+ *
+ * Returns 1 with the part below the root in `out` (backslashes, no leading
+ * separator; "" for the root) for the disc's own roots (CdRom0, D:), 3 the
+ * same way for the other roots the game dir stands in for (E:, C:, Y:,
+ * Partition1-2), 2 for the bare CdRom0 device, and 0 for anything else.
+ */
+int xbox_path_game_rest(const char *xbox_path, char *out, size_t n)
+{
+    char linked[2][512];
+    const char *p = xbox_path;
+    const char *d;
+    int i, hop, skip, m, disc;
+
+    if (!p || !p[0] || !out || !n)
+        return 0;
+    for (hop = 0; hop < 8; hop++) {
+        if (!resolve_symlink(p, linked[hop & 1], sizeof linked[0]))
+            break;
+        p = linked[hop & 1];
+    }
+    if (xbox_partition_device_digit(p))
+        return 0;
+    d = p;
+    if (match_prefix(d, "\\??\\"))
+        d += 4;
+    m = match_prefix(d, "\\Device\\CdRom0");
+    if (m && (d[m] == '\0' || ((d[m] == '\\' || d[m] == '/') && d[m + 1] == '\0')))
+        return 2;
+
+    for (i = 0; i < PATH_RULE_COUNT; i++) {
+        skip = match_rule(p, &s_rules[i]);
+        if (!skip)
+            continue;
+        if (s_rules[i].to_save != 0)
+            return 0;
+        {
+            const char *pre = s_rules[i].prefix;
+            if (match_prefix(pre, "\\??\\"))
+                pre += 4;
+            disc = match_prefix(pre, "\\Device\\CdRom0\\") || match_prefix(pre, "D:\\");
+        }
+        p += skip;
+        while (*p == '\\' || *p == '/')
+            p++;
+        if (strlen(p) >= n)
+            return 0;
+        for (i = 0; p[i]; i++)
+            out[i] = p[i] == '/' ? '\\' : p[i];
+        out[i] = '\0';
+        return disc ? 1 : 3;
+    }
+    return 0;
+}
+
 /* The running title's id, from its XBE certificate (xbox_MemoryLayoutInit),
  * or 0 before that. With no save dir from the game, xbox_path_init roots the
  * default hard disk at <base>/xboxrecomp/<title id>. A single shared

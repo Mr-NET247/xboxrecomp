@@ -19,6 +19,7 @@
 #endif
 #include "kernel.h"
 #include "kernel_ramfs.h"
+#include "kernel_disc.h"
 #include "guest_det_device.h"
 #include <stdatomic.h>
 #include <stddef.h>
@@ -1907,6 +1908,15 @@ static NTSTATUS host_NtQueryDirectoryFile(
         }                                           \
     } while (0)
 
+/* Then the disc image (kernel_disc.c; off until a host opens one): the game
+ * files tree's names that are on the disc never reach the host filesystem. */
+#define DISC_FIRST(call) do {                      \
+        if (xbox_disc_active()) {                   \
+            NTSTATUS disc_st;                       \
+            if (call) return disc_st;               \
+        }                                           \
+    } while (0)
+
 /* ---- the Saves page's busy guard (openspec overlay-saves, D4) ----
  *
  * The menu's export reads the title's save folders and its import swaps them
@@ -2089,6 +2099,9 @@ NTSTATUS __stdcall xbox_NtCreateFile(
     RAMFS_FIRST(xbox_ramfs_create(FileHandle, DesiredAccess, ObjectAttributes,
                                   IoStatusBlock, CreateDisposition, CreateOptions,
                                   &ramfs_st));
+    DISC_FIRST(xbox_disc_create(FileHandle, DesiredAccess, ObjectAttributes,
+                                IoStatusBlock, CreateDisposition, CreateOptions,
+                                &disc_st));
     st = host_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes,
                            IoStatusBlock, AllocationSize, FileAttributes,
                            ShareAccess, CreateDisposition, CreateOptions);
@@ -2104,6 +2117,8 @@ NTSTATUS __stdcall xbox_NtReadFile(
 {
     RAMFS_FIRST(xbox_ramfs_read(FileHandle, Event, IoStatusBlock, Buffer, Length,
                                 ByteOffset, &ramfs_st));
+    DISC_FIRST(xbox_disc_read(FileHandle, Event, IoStatusBlock, Buffer, Length,
+                              ByteOffset, &disc_st));
     return host_NtReadFile(FileHandle, Event, ApcRoutine, ApcContext,
                            IoStatusBlock, Buffer, Length, ByteOffset);
 }
@@ -2115,6 +2130,7 @@ NTSTATUS __stdcall xbox_NtWriteFile(
 {
     RAMFS_FIRST(xbox_ramfs_write(FileHandle, Event, IoStatusBlock, Buffer, Length,
                                  ByteOffset, &ramfs_st));
+    DISC_FIRST(xbox_disc_write(FileHandle, IoStatusBlock, &disc_st));
     saves_touch(FileHandle);
     return host_NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext,
                             IoStatusBlock, Buffer, Length, ByteOffset);
@@ -2124,6 +2140,8 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
 {
     if (xbox_ramfs_active() && xbox_ramfs_close(Handle))
         return STATUS_SUCCESS;
+    if (xbox_disc_active() && xbox_disc_close(Handle))
+        return STATUS_SUCCESS;
     saves_closed(Handle);
     return host_NtClose(Handle);
 }
@@ -2131,6 +2149,7 @@ NTSTATUS __stdcall xbox_NtClose(HANDLE Handle)
 NTSTATUS __stdcall xbox_NtDeleteFile(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes)
 {
     RAMFS_FIRST(xbox_ramfs_delete(ObjectAttributes, &ramfs_st));
+    DISC_FIRST(xbox_disc_delete(ObjectAttributes, &disc_st));
     if (ObjectAttributes && saves_name(ObjectAttributes)) {
         saves_lock();
         saves_stamp();
@@ -2145,6 +2164,8 @@ NTSTATUS __stdcall xbox_NtQueryInformationFile(
 {
     RAMFS_FIRST(xbox_ramfs_query_info(FileHandle, IoStatusBlock, FileInformation,
                                       Length, FileInformationClass, &ramfs_st));
+    DISC_FIRST(xbox_disc_query_info(FileHandle, IoStatusBlock, FileInformation,
+                                    Length, FileInformationClass, &disc_st));
     return host_NtQueryInformationFile(FileHandle, IoStatusBlock, FileInformation,
                                        Length, FileInformationClass);
 }
@@ -2155,6 +2176,8 @@ NTSTATUS __stdcall xbox_NtSetInformationFile(
 {
     RAMFS_FIRST(xbox_ramfs_set_info(FileHandle, IoStatusBlock, FileInformation,
                                     Length, FileInformationClass, &ramfs_st));
+    DISC_FIRST(xbox_disc_set_info(FileHandle, IoStatusBlock, FileInformation,
+                                  Length, FileInformationClass, &disc_st));
     saves_touch(FileHandle);
     return host_NtSetInformationFile(FileHandle, IoStatusBlock, FileInformation,
                                      Length, FileInformationClass);
@@ -2166,6 +2189,8 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
 {
     RAMFS_FIRST(xbox_ramfs_query_volume(FileHandle, IoStatusBlock, FsInformation,
                                         Length, FsInformationClass, &ramfs_st));
+    DISC_FIRST(xbox_disc_query_volume(FileHandle, IoStatusBlock, FsInformation,
+                                      Length, FsInformationClass, &disc_st));
     return host_NtQueryVolumeInformationFile(FileHandle, IoStatusBlock, FsInformation,
                                              Length, FsInformationClass);
 }
@@ -2173,6 +2198,7 @@ NTSTATUS __stdcall xbox_NtQueryVolumeInformationFile(
 NTSTATUS __stdcall xbox_NtFlushBuffersFile(HANDLE FileHandle, PXBOX_IO_STATUS_BLOCK IoStatusBlock)
 {
     RAMFS_FIRST(xbox_ramfs_flush(FileHandle, IoStatusBlock, &ramfs_st));
+    DISC_FIRST(xbox_disc_flush(FileHandle, IoStatusBlock, &disc_st));
     return host_NtFlushBuffersFile(FileHandle, IoStatusBlock);
 }
 
@@ -2181,6 +2207,7 @@ NTSTATUS __stdcall xbox_NtQueryFullAttributesFile(
     PXBOX_FILE_NETWORK_OPEN_INFORMATION FileInformation)
 {
     RAMFS_FIRST(xbox_ramfs_query_full(ObjectAttributes, FileInformation, &ramfs_st));
+    DISC_FIRST(xbox_disc_query_full(ObjectAttributes, FileInformation, &disc_st));
     return host_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
 }
 
@@ -2193,6 +2220,9 @@ NTSTATUS __stdcall xbox_NtQueryDirectoryFile(
     RAMFS_FIRST(xbox_ramfs_query_dir(FileHandle, IoStatusBlock, FileInformation,
                                      Length, FileInformationClass, FileName,
                                      RestartScan, &ramfs_st));
+    DISC_FIRST(xbox_disc_query_dir(FileHandle, IoStatusBlock, FileInformation,
+                                   Length, FileInformationClass, FileName,
+                                   RestartScan, &disc_st));
     return host_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext,
                                      IoStatusBlock, FileInformation, Length,
                                      FileInformationClass, FileName, RestartScan);
@@ -2202,6 +2232,7 @@ NTSTATUS __stdcall xbox_RenameFileByHandle(
     HANDLE FileHandle, PXBOX_OBJECT_ATTRIBUTES NewName, BOOLEAN ReplaceIfExists)
 {
     RAMFS_FIRST(xbox_ramfs_rename(FileHandle, NewName, ReplaceIfExists, &ramfs_st));
+    DISC_FIRST(xbox_disc_rename(FileHandle, &disc_st));
     saves_touch(FileHandle);
     return host_RenameFileByHandle(FileHandle, NewName, ReplaceIfExists);
 }

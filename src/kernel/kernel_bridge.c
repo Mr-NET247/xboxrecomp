@@ -33,6 +33,7 @@
 #include "guest_time.h"
 #include "guest_state_hash.h"
 #include "kernel_ramfs.h"
+#include "kernel_disc.h"
 #include "recomp_env.h"
 #include "platform/host_time.h"
 #include "platform/host_prof.h"
@@ -7594,6 +7595,13 @@ static void bridge_NtDuplicateObject(void)
      * give an event the store does not know. The store makes the handle. */
     if (xbox_ramfs_active()
             && xbox_ramfs_duplicate(src, &dup, (opts & DUPLICATE_CLOSE_SOURCE) != 0)) {
+        if (!dup) {
+            g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
+            return;
+        }
+    } else if (xbox_disc_active()
+            && xbox_disc_duplicate(src, &dup, (opts & DUPLICATE_CLOSE_SOURCE) != 0)) {
+        /* The same for a disc image handle (kernel_disc.c). */
         if (!dup) {
             g_eax = 0xC0000001u;   /* STATUS_UNSUCCESSFUL */
             return;
