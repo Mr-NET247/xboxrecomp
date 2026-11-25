@@ -276,6 +276,7 @@ extern "C" {
     X(METAL_HOST_DUMP,   DEBUG, "metal_host_dump", NULL,                       "=prefix: Metal host-size frame dumps (render.scale, display.aspect) as <prefix>host_NNNNN.bmp, every fb_dump_flips flip") \
     X(METAL_WRITEBACK,   DEBUG, "metal_writeback", NULL,                       "=lazy|always: Metal writes guest memory when a dump reads it (default) or at every flip") \
     X(METAL_FB_GUARD,    DEBUG, "metal_fb_guard",  NULL,                       "trap title reads of the last Metal present surface; a read switches to metal_writeback=always") \
+    X(SKIP_FILES,        CONFIG, "RECOMP_SKIP_FILES",        NULL, "comma list of path suffixes the title is told do not exist (e.g. a movie): TrD_ENG.xmv,TrC_ENG.xmv") \
     X(METAL_OCC,         DEBUG, "metal_occ",       "RECOMP_METAL_OCC",         "=sync|fixed: Metal occlusion mode") \
     X(METAL_SHADER_NONCE, DEBUG, "metal_shader_nonce", NULL, "=text: Metal renames each runtime shader's entry point with this suffix and the PID, so macOS's shader caches miss (cold-cache timing)") \
     X(METAL_MSL_VERSION, DEBUG, "metal_msl_version", NULL, "=major.minor: Metal compiles its shaders at this MSL version instead of 3.0; 0 takes the OS default (much slower on macOS 27); an unknown version is ignored with a warning") \
