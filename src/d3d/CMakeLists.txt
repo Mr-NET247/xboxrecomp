@@ -47,9 +47,9 @@ if(WIN32)
     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../tests/d3d11_backend_smoke
                      ${CMAKE_CURRENT_BINARY_DIR}/d3d11_backend_smoke)
 else()
-    # iOS has no OpenGL: d3d8_none.c stands in for the GL device, which the
-    # pushbuffer path (the Metal backend) never uses.
-    if(IOS)
+    # iOS and Android have no desktop OpenGL: d3d8_none.c stands in for the
+    # GL device, which the pushbuffer path (Metal, Vulkan) never uses.
+    if(IOS OR ANDROID)
         set(_xbox_d3d8_device d3d8_none.c)
     else()
         set(_xbox_d3d8_device d3d8_gl.c)
@@ -65,7 +65,7 @@ else()
         shader_cache.c
     )
     find_package(SDL3 3.2 CONFIG REQUIRED)
-    if(NOT IOS)
+    if(NOT IOS AND NOT ANDROID)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(EPOXY REQUIRED epoxy)
     endif()
@@ -115,7 +115,9 @@ if(XBOXRECOMP_VULKAN)
     # shaderc is C++ inside.
     if(APPLE)
         target_link_libraries(xbox_d3d8 PUBLIC c++)
-    elseif(NOT ANDROID)
+    elseif(ANDROID)
+        target_link_libraries(xbox_d3d8 PUBLIC c++_static c++abi)
+    else()
         target_link_libraries(xbox_d3d8 PUBLIC stdc++)
     endif()
 endif()

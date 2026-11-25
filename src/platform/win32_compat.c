@@ -49,6 +49,28 @@
 #include <sys/sysinfo.h>
 #endif
 
+#if defined(__ANDROID__)
+/* Bionic lacks a few glibc calls this file uses: the same through the
+ * kernel (affinity by thread id, memfd by syscall), and no cancellation
+ * (TerminateThread then only marks the thread finished, as it reports). */
+#include <sys/syscall.h>
+static int pthread_setaffinity_np(pthread_t t, size_t n, const cpu_set_t *set)
+{
+    return sched_setaffinity(pthread_gettid_np(t), n, set);
+}
+static int pthread_getaffinity_np(pthread_t t, size_t n, cpu_set_t *set)
+{
+    return sched_getaffinity(pthread_gettid_np(t), n, set);
+}
+#define pthread_cancel(t) ((void)(t), 0)
+static void explicit_bzero(void *p, size_t n)
+{
+    memset(p, 0, n);
+    __asm__ __volatile__("" : : "r"(p) : "memory");
+}
+#define memfd_create(name, flags) ((int)syscall(__NR_memfd_create, (name), (flags)))
+#endif
+
 /* ===================================================================== */
 /* Last-error (thread-local)                                             */
 /* ===================================================================== */
