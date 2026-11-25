@@ -165,13 +165,11 @@ extern uint32_t g_xbox_code_hi;
 #  define RECOMP_TLS _Thread_local
 #endif
 
-extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
-extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
+#include "recomp_tls_regs.h"   /* g_regs: g_eax ... g_fp_stack */
+
 
 /* x87 stack. Per-thread for the same reason the integer registers are:
  * arguments are passed in st(0)/st(1) across call boundaries. */
-extern RECOMP_TLS double g_fp_stack[8];
-extern RECOMP_TLS int g_fp_top;
 
 /**
  * SEH frame pointer bridge.
@@ -189,10 +187,8 @@ extern RECOMP_TLS int g_fp_top;
  * Per-thread, because a TIB is. fs:[0] is the SEH chain head and fs:[4]
  * reaches the CRT's per-thread data, so a single shared base makes every
  * guest thread the same thread as far as the CRT is concerned. */
-extern RECOMP_TLS uint32_t g_fs_base;
 #define XBOX_FS_BASE g_fs_base
 
-extern RECOMP_TLS uint32_t g_seh_ebp;
 
 /* ---- non-local jumps (setjmp / longjmp) --------------------------------
  *
@@ -234,7 +230,6 @@ extern RECOMP_TLS uint32_t g_seh_ebp;
 #include <setjmp.h>
 jmp_buf *recomp_setjmp_slot(uint32_t buf_va);
 int recomp_guest_longjmp(uint32_t buf_va, uint32_t value);
-extern RECOMP_TLS uint32_t g_ebp;
 
 /* EFLAGS.DF, and the signed step the string instructions take because of it.
  *
@@ -248,8 +243,6 @@ extern RECOMP_TLS uint32_t g_ebp;
  * be found by name, and the dashboard rebooted rather than showing a UI.
  * memmove's overlapping case is the same instruction and the same bug.
  */
-extern RECOMP_TLS int g_df;
-extern RECOMP_TLS uint32_t g_eflags; /* EFLAGS image: pushfd, popfd */
 #define RECOMP_DF_STEP(n) (g_df ? -(int32_t)(n) : (int32_t)(n))
 
 /* EFLAGS as pushfd and popfd see it.
@@ -284,16 +277,12 @@ void xbox_Cpuid(uint32_t leaf, uint32_t subleaf, uint32_t out[4]);
    above is: one guest routine can lift to several C functions, so a compare
    and the FNSTSW that reads it can land in different bodies, and the control
    word has to survive a call. (g_fp_stack/g_fp_top are declared above.) */
-extern RECOMP_TLS uint16_t g_fp_control_word;
-extern RECOMP_TLS int g_fp_cmp;
-extern RECOMP_TLS uint16_t g_fp_cc;
 /* SSE control and status (MXCSR), reset value 0x1F80: every exception
  * masked, rounding to nearest. Like the x87 control word it is guest state
  * that STMXCSR stores and LDMXCSR loads; the host's MXCSR is never changed.
  * The rounding-control bits (13-14) steer CVTSS2SI/CVTSD2SI. The exception
  * flags (bits 0-5) are not modelled and read as clear, as the x87 status
  * word's exception byte is not. */
-extern RECOMP_TLS uint32_t g_mxcsr;
 /* x87 precision control (control word bits 8-9). The stack is double-backed,
  * which matches PC=53 and is close enough for PC=64, but PC=24 -- what the
  * Xbox runs with -- rounds every arithmetic result to float. A title that
@@ -716,8 +705,6 @@ typedef union RecompXmm {
 } RecompXmm;
 #endif
 
-extern RECOMP_TLS RecompXmm g_xmm0, g_xmm1, g_xmm2, g_xmm3;
-extern RECOMP_TLS RecompXmm g_xmm4, g_xmm5, g_xmm6, g_xmm7;
 
 /* -- construction -- */
 
@@ -1482,8 +1469,6 @@ typedef union RecompMmx {
 } RecompMmx;
 #endif
 
-extern RECOMP_TLS RecompMmx g_mm0, g_mm1, g_mm2, g_mm3;
-extern RECOMP_TLS RecompMmx g_mm4, g_mm5, g_mm6, g_mm7;
 
 static inline RecompMmx MMX_ZERO(void) { RecompMmx r; r.q = 0; return r; }
 
@@ -1725,6 +1710,9 @@ static inline RecompMmx MMX_PSADBW(RecompMmx a, RecompMmx b) {
     r.q = 0; r.uw[0] = (uint16_t)s;
     return r;
 }
+
+#define RECOMP_TLS_REGS_VECTORS
+#include "recomp_tls_regs.h"   /* g_vregs: g_xmm0 ... g_mm7 */
 
 #define xmm0 g_xmm0
 #define xmm1 g_xmm1
