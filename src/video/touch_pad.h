@@ -6,8 +6,12 @@
 #include <SDL3/SDL.h>
 
 /* On by default on iOS and Android, off elsewhere; RECOMP_TOUCH=1 or 0
- * forces it. Call once the window is up; installs the external pad. */
+ * forces it. Call once the window is up; installs the external pad.
+ * By default the controls hide while a gamepad or a hardware keyboard is
+ * there (touch_pad.c); RECOMP_TOUCH=1 keeps them up. */
 int  touch_pad_init(void);
+/* Nonzero while the controls are drawn and take touches (any thread). */
+int  touch_pad_visible(void);
 /* A window event; nonzero when the controls need drawing again. */
 int  touch_pad_event(const SDL_Event *ev, int out_w, int out_h);
 /* Over the frame, before the present. */
