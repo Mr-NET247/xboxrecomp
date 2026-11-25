@@ -40,7 +40,7 @@ of skipping it.
   capabilities.
 
 The `hook` cell names the module hook that resets a `reset` row:
-renderer.metal, renderer.d3d11, renderer.common, pgraph, hle_d3d8, apu,
+renderer.metal, renderer.d3d11, renderer.vulkan, renderer.common, pgraph, hle_d3d8, apu,
 dsp, dsound, input, usb, video, kernel, memory, xbe, guest_mem_init, clocks,
 saves, mods, enhance or platform. For a pointer into guest memory, it is the
 module that owns the pointer. For kind `once`, `why` starts with `rerun:`
@@ -227,6 +227,28 @@ The key of a row is `file | scope | name`; line numbers are not part of it.
 | src/kernel/kernel_bridge.c | - | g_thunk_table_count | file_static | constant | - | thunk table address parsed from the XBE header |
 | src/kernel/kernel_bridge.c | - | g_ordinal_remap | file_static | constant | - | per-title ordinal remap the game sets |
 | src/kernel/kernel_bridge.c | - | g_ordinal_remap_count | file_static | constant | - | per-title ordinal remap the game sets |
+
+### src/kernel/kernel_disc.c
+
+| file | scope | name | kind | class | hook | why |
+|---|---|---|---|---|---|---|
+| src/kernel/kernel_disc.c | - | s_lock | file_static | keep | - | host lock over the handle table; never held at a stop point |
+| src/kernel/kernel_disc.c | - | s_active | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_env_checked | file_static | keep | - | cached env read |
+| src/kernel/kernel_disc.c | - | s_trace | file_static | keep | - | cached env read |
+| src/kernel/kernel_disc.c | - | s_image_path | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_base | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_image_size | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_volume_time | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_nodes | file_static | keep | - | name table built from the image once; the disc does not change |
+| src/kernel/kernel_disc.c | - | s_node_count | file_static | keep | - | name table built from the image once; the disc does not change |
+| src/kernel/kernel_disc.c | - | s_node_cap | file_static | keep | - | name table built from the image once; the disc does not change |
+| src/kernel/kernel_disc.c | - | s_handles | file_static | reset | kernel | guest file handles on the image; closed at reset |
+| src/kernel/kernel_disc.c | - | s_handle_count | file_static | reset | kernel | guest file handles on the image; closed at reset |
+| src/kernel/kernel_disc.c | - | s_handle_cap | file_static | keep | - | scratch capacity |
+| src/kernel/kernel_disc.c | - | s_fp | file_static | keep | - | the open disc image; the same disc boots again |
+| src/kernel/kernel_disc.c | - | s_io_lock | file_static | keep | - | host lock over the image reads |
+| src/kernel/kernel_disc.c | - | s_fd | file_static | keep | - | the open disc image; the same disc boots again |
 
 ### src/kernel/kernel_file.c
 
@@ -779,13 +801,7 @@ The key of a row is `file | scope | name`; line numbers are not part of it.
 | src/kernel/xbox_memory_layout.c | - | g_tls_template_va | file_static | keep | - | TLS template shape from the XBE; band 9 rewrites the block |
 | src/kernel/xbox_memory_layout.c | - | g_tls_total | file_static | keep | - | TLS template shape from the XBE; band 9 rewrites the block |
 | src/kernel/xbox_memory_layout.c | - | g_tls_thread_size | file_static | keep | - | TLS template shape from the XBE; band 9 rewrites the block |
-| src/kernel/xbox_memory_layout.c | - | g_eax | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_ecx | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_edx | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 | src/kernel/xbox_memory_layout.c | - | g_esp | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_ebx | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_esi | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_edi | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 | src/kernel/xbox_memory_layout.c | recomp_abi_violation_log | seen | local_static | keep | - | ABI violation log guards and counts |
 | src/kernel/xbox_memory_layout.c | recomp_abi_violation_log | hits | local_static | keep | - | ABI violation log guards and counts |
 | src/kernel/xbox_memory_layout.c | recomp_abi_violation_log | count | local_static | keep | - | ABI violation log guards and counts |
@@ -824,22 +840,6 @@ The key of a row is `file | scope | name`; line numbers are not part of it.
 | src/kernel/xbox_memory_layout.c | - | g_watch_derefs | file_static | keep | - | RECOMP_WATCH debug watch; stays armed across reset |
 | src/kernel/xbox_memory_layout.c | - | g_watch_root | file_static | keep | - | RECOMP_WATCH debug watch; stays armed across reset |
 | src/kernel/xbox_memory_layout.c | - | g_watch_off | file_static | keep | - | RECOMP_WATCH debug watch; stays armed across reset |
-| src/kernel/xbox_memory_layout.c | - | g_mm0 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm1 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm2 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm3 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm4 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm5 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm6 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_mm7 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm0 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm1 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm2 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm3 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm4 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm5 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm6 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
-| src/kernel/xbox_memory_layout.c | - | g_xmm7 | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 | src/kernel/xbox_memory_layout.c | - | g_ebp | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 | src/kernel/xbox_memory_layout.c | - | g_df | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 | src/kernel/xbox_memory_layout.c | - | g_eflags | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
@@ -888,6 +888,8 @@ The key of a row is `file | scope | name`; line numbers are not part of it.
 | src/kernel/xbox_memory_layout.c | heap_quarantine_limit | limit | local_static | keep | - | quarantine limit env cache |
 | src/kernel/xbox_memory_layout.c | heap_trace_va | init | once | keep | - | no rerun: env trace VA read only |
 | src/kernel/xbox_memory_layout.c | heap_trace_va | va | local_static | keep | - | heap trace VA env cache |
+| src/kernel/xbox_memory_layout.c | - | g_dregs | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
+| src/kernel/xbox_memory_layout.c | - | g_vregs | tls | reset | kernel | boot thread guest register; boot loop sets g_esp again |
 
 ### src/kernel/kernel_reset_probe.c
 
@@ -1569,6 +1571,12 @@ Band 9 re-runs these after the memory clear (band 7) and the XBE reload (band 8)
 | src/d3d/d3d8_gl.c | - | g_d3d8 | file_static | keep | - | IDirect3D8 singleton, vtable only |
 | src/d3d/d3d8_gl.c | - | g_suppress_present | global | reset | pgraph | set by pb replay while it owns frame |
 
+### src/d3d/d3d8_none.c
+
+| file | scope | name | kind | class | hook | why |
+|---|---|---|---|---|---|---|
+| src/d3d/d3d8_none.c | - | g_suppress_present | global | reset | pgraph | set by pb replay while it owns frame |
+
 ### src/d3d/d3d8_resources.c
 
 | file | scope | name | kind | class | hook | why |
@@ -2140,6 +2148,187 @@ Band 9 re-runs these after the memory clear (band 7) and the XBE reload (band 8)
 | src/d3d/nv2a_pb_metal.m | - | s_stage_pack | file_static | keep | - | the entry each stage just bound, set again on each draw |
 | src/d3d/nv2a_pb_metal.m | - | s_stage_hash | file_static | keep | - | the entry each stage just bound, set again on each draw |
 
+### src/d3d/nv2a_pb_vulkan.c
+
+| file | scope | name | kind | class | hook | why |
+|---|---|---|---|---|---|---|
+| src/d3d/nv2a_pb_vulkan.c | - | s_inst | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pdev | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_dev | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_queue | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qfam | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_props | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_mem | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_dfmt | file_static | keep | - | Vulkan instance, device and queue; made once, kept like Metal's device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_failed | file_static | keep | - | backend failed to come up on this host |
+| src/d3d/nv2a_pb_vulkan.c | - | s_bc | file_static | keep | - | device feature (BC textures), read at init |
+| src/d3d/nv2a_pb_vulkan.c | - | s_aniso | file_static | keep | - | device feature (anisotropy), read at init |
+| src/d3d/nv2a_pb_vulkan.c | - | s_precise_occ | file_static | keep | - | device feature (precise occlusion), read at init |
+| src/d3d/nv2a_pb_vulkan.c | - | s_playout | file_static | keep | - | pipeline layout, fixed |
+| src/d3d/nv2a_pb_vulkan.c | - | s_dsl | file_static | keep | - | descriptor set layout, fixed |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pcache | file_static | keep | - | pipeline cache keyed by shader content |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qpool | file_static | keep | - | occlusion query pool, a device object |
+| src/d3d/nv2a_pb_vulkan.c | - | s_push_desc | file_static | keep | - | function table chosen from host capabilities |
+| src/d3d/nv2a_pb_vulkan.c | - | s_begin_rendering | file_static | keep | - | function table chosen from host capabilities |
+| src/d3d/nv2a_pb_vulkan.c | - | s_end_rendering | file_static | keep | - | function table chosen from host capabilities |
+| src/d3d/nv2a_pb_vulkan.c | - | s_legacy | file_static | keep | - | render pass path chosen from host capabilities |
+| src/d3d/nv2a_pb_vulkan.c | - | s_win | file_static | keep | - | presenter window (Vulkan surface) |
+| src/d3d/nv2a_pb_vulkan.c | - | s_surf | file_static | keep | - | presenter window surface |
+| src/d3d/nv2a_pb_vulkan.c | - | s_have_swapchain | file_static | keep | - | VK_KHR_swapchain on the device |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qlock | file_static | keep | - | host lock over queue submits; never held at a stop point |
+| src/d3d/nv2a_pb_vulkan.c | - | s_cc | file_static | keep | - | shaderc compiler |
+| src/d3d/nv2a_pb_vulkan.c | - | s_copt | file_static | keep | - | shaderc options |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vs_pass | file_static | keep | - | fixed pass-through shader |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_basic | file_static | keep | - | fixed basic shader |
+| src/d3d/nv2a_pb_vulkan.c | - | s_presents | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_clears | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_skipped | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_prog | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_culled | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_tex | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tex_uploads | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tex_rehash | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tex_changed | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_flushes | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_writebacks | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_stretch | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_zclears | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_draws_z | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_rtt_binds | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_self_copies | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_stale_drops | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_retired | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_evict_lost | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_blits_gpu | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_blits_guest | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_grows | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_partial_clears | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_decode_syncs | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pitch_alias_binds | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_compile_errors | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vs_compiled | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_compiled | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_report_commits | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pitch_alias_seen | file_static | keep | - | trace log-once pair set |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pool | file_static | keep | - | command pool |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sub_wait | file_static | keep | - | swapchain semaphores for the next submit, set per flip |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sub_signal | file_static | keep | - | swapchain semaphores for the next submit, set per flip |
+| src/d3d/nv2a_pb_vulkan.c | - | s_slot | file_static | keep | - | command buffer slots and fences; drained by the reset flush |
+| src/d3d/nv2a_pb_vulkan.c | - | s_cur | file_static | reset | renderer.vulkan | open command buffer; flush submits and nils it |
+| src/d3d/nv2a_pb_vulkan.c | - | s_serial | file_static | keep | - | monotonic submit serial |
+| src/d3d/nv2a_pb_vulkan.c | - | s_done | file_static | keep | - | monotonic completed serial |
+| src/d3d/nv2a_pb_vulkan.c | - | s_last | file_static | keep | - | monotonic last submitted serial |
+| src/d3d/nv2a_pb_vulkan.c | - | s_grave | file_static | keep | - | deferred destroys keyed by serial; drained by the reset flush |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ngrave | file_static | keep | - | deferred destroy count |
+| src/d3d/nv2a_pb_vulkan.c | - | s_grave_cap | file_static | keep | - | scratch capacity |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vb | file_static | keep | - | host GPU ring buffer |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ib | file_static | keep | - | host GPU ring buffer |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ub | file_static | keep | - | host GPU ring buffer |
+| src/d3d/nv2a_pb_vulkan.c | - | s_stage_ring | file_static | keep | - | host GPU ring buffer |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ssbo_align | file_static | keep | - | device limit |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ubo_align | file_static | keep | - | device limit |
+| src/d3d/nv2a_pb_vulkan.c | - | s_in_pass | file_static | reset | renderer.vulkan | open render pass; ended before drops |
+| src/d3d/nv2a_pb_vulkan.c | - | s_enc_rt | file_static | reset | renderer.vulkan | points into s_rt: pass target |
+| src/d3d/nv2a_pb_vulkan.c | - | s_enc_dt | file_static | reset | renderer.vulkan | points into s_dt: pass depth |
+| src/d3d/nv2a_pb_vulkan.c | - | s_enc_serial | file_static | reset | renderer.vulkan | serial of the open pass |
+| src/d3d/nv2a_pb_vulkan.c | - | s_occ_q | file_static | reset | renderer.vulkan | query counting on the open pass |
+| src/d3d/nv2a_pb_vulkan.c | - | s_occ_slot | file_static | reset | renderer.vulkan | visibility slot on the open pass |
+| src/d3d/nv2a_pb_vulkan.c | - | s_cmemo | file_static | reset | renderer.vulkan | c[] gen memo on the pass; pgraph gen rewinds |
+| src/d3d/nv2a_pb_vulkan.c | init | tried | local_static | keep | - | no rerun: device made once |
+| src/d3d/nv2a_pb_vulkan.c | - | s_rb | file_static | keep | - | host GPU readback ring |
+| src/d3d/nv2a_pb_vulkan.c | - | s_rp | file_static | keep | - | render passes keyed by format |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fb | file_static | reset | renderer.vulkan | framebuffers over s_rt/s_dt views; destroyed with them |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fb_n | file_static | reset | renderer.vulkan | framebuffer count, with s_fb |
+| src/d3d/nv2a_pb_vulkan.c | - | s_rt | file_static | reset | renderer.vulkan | render targets keyed by guest surface; drop without write-back |
+| src/d3d/nv2a_pb_vulkan.c | - | s_dt | file_static | reset | renderer.vulkan | depth targets keyed by guest zeta offset |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tick | file_static | keep | - | monotonic LRU clock |
+| src/d3d/nv2a_pb_vulkan.c | alias_check_on | on | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | rt_drop_if_stale | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | rt_grow | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pso | file_static | keep | - | pipelines keyed by shaders and state |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pso_n | file_static | keep | - | pipeline cache fill count |
+| src/d3d/nv2a_pb_vulkan.c | - | s_pso_last | file_static | keep | - | last pipeline hit, a lookup hint checked by key |
+| src/d3d/nv2a_pb_vulkan.c | pipeline | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | pipeline | next | local_static | keep | - | round-robin eviction index |
+| src/d3d/nv2a_pb_vulkan.c | - | s_stage | file_static | reset | renderer.vulkan | stages decoded from guest texture registers |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tc | file_static | reset | renderer.vulkan | textures keyed by guest offset/format, from guest memory |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tc_clock | file_static | keep | - | monotonic LRU clock |
+| src/d3d/nv2a_pb_vulkan.c | tex_cache_n | n | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | - | s_texels | file_static | keep | - | host decode scratch buffer |
+| src/d3d/nv2a_pb_vulkan.c | - | s_texels_cap | file_static | keep | - | scratch buffer capacity |
+| src/d3d/nv2a_pb_vulkan.c | - | s_black | file_static | keep | - | fixed black texture |
+| src/d3d/nv2a_pb_vulkan.c | - | s_magenta | file_static | keep | - | fixed magenta texture |
+| src/d3d/nv2a_pb_vulkan.c | - | s_black_cube | file_static | keep | - | fixed black cube texture |
+| src/d3d/nv2a_pb_vulkan.c | - | s_black_3d | file_static | keep | - | fixed black 3D texture |
+| src/d3d/nv2a_pb_vulkan.c | no_mips | off | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | memo_on | on | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | build_stages | memo | local_static | reset | renderer.vulkan | keyed on tex-regs gen/contig; both rewind at reset |
+| src/d3d/nv2a_pb_vulkan.c | - | s_up_scale | file_static | keep | - | the upload just made, read back by its caller |
+| src/d3d/nv2a_pb_vulkan.c | - | s_up_levels | file_static | keep | - | the upload just made, read back by its caller |
+| src/d3d/nv2a_pb_vulkan.c | tex_upload | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | - | s_tex_last | file_static | keep | - | the entry tex_bind just bound, set again on each bind |
+| src/d3d/nv2a_pb_vulkan.c | tex_bind_body | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | - | s_stage_pack | file_static | keep | - | the entry each stage just bound, set again on each draw |
+| src/d3d/nv2a_pb_vulkan.c | - | s_stage_hash | file_static | keep | - | the entry each stage just bound, set again on each draw |
+| src/d3d/nv2a_pb_vulkan.c | border_colour | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | - | s_smp | file_static | keep | - | samplers keyed by sampler state |
+| src/d3d/nv2a_pb_vulkan.c | - | s_smp_n | file_static | keep | - | sampler cache fill count |
+| src/d3d/nv2a_pb_vulkan.c | sampler | point | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | sampler | next | local_static | keep | - | round-robin eviction index |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vs | file_static | keep | - | VS modules keyed by vertex program content hash |
+| src/d3d/nv2a_pb_vulkan.c | vs_cache | parsed | local_static | keep | - | scratch parse buffer |
+| src/d3d/nv2a_pb_vulkan.c | vs_cache | src | local_static | keep | - | scratch GLSL buffer |
+| src/d3d/nv2a_pb_vulkan.c | vs_cache | memo | local_static | reset | renderer.vulkan | keyed on prog_dwords/start; pgraph counter rewinds at reset |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs | file_static | keep | - | FS modules keyed by combiner-state content |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_n | file_static | keep | - | FS cache fill count |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_decl | file_static | keep | - | set by fs_select before every batch's binds |
+| src/d3d/nv2a_pb_vulkan.c | fs_basic | tried | local_static | keep | - | basic FS built once |
+| src/d3d/nv2a_pb_vulkan.c | fs_basic | fn | local_static | keep | - | basic FS built once |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_comb | file_static | keep | - | set by fs_select before every batch's binds |
+| src/d3d/nv2a_pb_vulkan.c | - | s_fs_w | file_static | keep | - | set by fs_select before every batch's binds |
+| src/d3d/nv2a_pb_vulkan.c | fs_select_body | src | local_static | keep | - | scratch GLSL buffer |
+| src/d3d/nv2a_pb_vulkan.c | fs_select_body | memo | local_static | keep | - | keyed by combiner register content, kept s_fs |
+| src/d3d/nv2a_pb_vulkan.c | - | s_self | file_static | reset | renderer.vulkan | self-sample copy of a guest frame target |
+| src/d3d/nv2a_pb_vulkan.c | rt_texture | off | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | rt_texture | said | local_static | keep | - | log-once guard |
+| src/d3d/nv2a_pb_vulkan.c | - | s_smp_cur | file_static | keep | - | samplers bound on the stages, set again on each draw |
+| src/d3d/nv2a_pb_vulkan.c | vk_on_draw | idx | local_static | keep | - | scratch index buffer |
+| src/d3d/nv2a_pb_vulkan.c | vk_on_draw | idx_cap | local_static | keep | - | scratch capacity |
+| src/d3d/nv2a_pb_vulkan.c | vk_on_draw | hxy | local_static | keep | - | scratch hor+ vertex xy |
+| src/d3d/nv2a_pb_vulkan.c | vk_on_draw | hxy_cap | local_static | keep | - | scratch capacity |
+| src/d3d/nv2a_pb_vulkan.c | write_back_px | row | local_static | keep | - | scratch row buffer |
+| src/d3d/nv2a_pb_vulkan.c | write_back_px | row_cap | local_static | keep | - | scratch capacity |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qp | file_static | keep | - | query records; the free list is refilled when s_occ resets |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qfree | file_static | keep | - | query free list; refilled when s_occ resets |
+| src/d3d/nv2a_pb_vulkan.c | - | s_qmade | file_static | keep | - | query records made |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vis_used | file_static | reset | renderer.vulkan | visibility slots held by pending queries |
+| src/d3d/nv2a_pb_vulkan.c | - | s_vis_next | file_static | reset | renderer.vulkan | next visibility slot to hand out |
+| src/d3d/nv2a_pb_vulkan.c | - | s_retire | file_static | reset | renderer.vulkan | slots awaiting retire after a wait |
+| src/d3d/nv2a_pb_vulkan.c | - | s_nretire | file_static | reset | renderer.vulkan | count of slots awaiting retire |
+| src/d3d/nv2a_pb_vulkan.c | - | s_occ | file_static | reset | renderer.vulkan | pending occlusion reports at guest VAs |
+| src/d3d/nv2a_pb_vulkan.c | - | s_occ_mode | file_static | keep | - | cached occlusion mode read |
+| src/d3d/nv2a_pb_vulkan.c | - | s_occ_ovf | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | - | s_shown_w | file_static | keep | - | last present extent, host display |
+| src/d3d/nv2a_pb_vulkan.c | - | s_shown_h | file_static | keep | - | last present extent, host display |
+| src/d3d/nv2a_pb_vulkan.c | - | s_window_presents | file_static | keep | - | stats counter |
+| src/d3d/nv2a_pb_vulkan.c | host_dump_due | prefix | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | host_dump_due | every | local_static | keep | - | cached env read |
+| src/d3d/nv2a_pb_vulkan.c | - | s_swap | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_img | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_view | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_fb | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_n | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_ext | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_fmt | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_acq | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_done | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ov_pso | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ov_layout | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_ov_rp | file_static | keep | - | window swapchain and its present pipeline |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_retry | file_static | keep | - | flip at which to make the swapchain again |
+| src/d3d/nv2a_pb_vulkan.c | - | s_sw_presents | file_static | keep | - | stats counter |
+
 ## Devices: APU, DSP, audio, input, USB, video, platform
 
 ### src/apu/apu_core.c
@@ -2365,6 +2554,10 @@ Band 9 re-runs these after the memory clear (band 7) and the XBE reload (band 8)
 | src/input/input_core.c | - | g_last_lock | file_static | keep | - | host pad backend; pads stay connected |
 | src/input/input_core.c | - | g_neutral | file_static | keep | - | host pad backend; pads stay connected |
 | src/input/input_core.c | - | g_neutral_bump | file_static | keep | - | monotonic packet number bump |
+| src/input/input_core.c | - | g_ext_pad | file_static | keep | - | host external pad (the on-screen controls); stays installed |
+| src/input/input_core.c | - | g_pulse_buttons | file_static | reset | input | the front end's button pulse; must not carry into the new boot |
+| src/input/input_core.c | - | g_pulse_analog | file_static | reset | input | the front end's button pulse; must not carry into the new boot |
+| src/input/input_core.c | - | g_pulse_until | file_static | reset | input | the front end's button pulse; must not carry into the new boot |
 
 ### src/input/kbm_script.c
 
@@ -2791,6 +2984,9 @@ Band 9 re-runs these after the memory clear (band 7) and the XBE reload (band 8)
 | src/video/fb_present_metal.m | - | s_chain_said | file_static | keep | - | Metal present chain and overlay |
 | src/video/fb_present_metal.m | - | s_chain_src | file_static | keep | - | Metal present chain and overlay |
 | src/video/fb_present_metal.m | - | s_chain_out | file_static | keep | - | Metal present chain and overlay |
+| src/video/fb_present_metal.m | - | s_pso_touch | file_static | keep | - | Metal present chain and overlay |
+| src/video/fb_present_metal.m | - | s_touch_vb | file_static | keep | - | Metal present chain and overlay |
+| src/video/fb_present_metal.m | - | s_touch_cur | file_static | keep | - | Metal present chain and overlay |
 
 ### src/video/fb_present_sdl.c
 
@@ -2824,6 +3020,21 @@ Band 9 re-runs these after the memory clear (band 7) and the XBE reload (band 8)
 | src/video/fb_present_sdl.c | - | s_ovl_tex | file_static | keep | - | host present slots and window |
 | src/video/fb_present_sdl.c | - | s_ovl_tex_gen | file_static | keep | - | host present slots and window |
 | src/video/fb_present_sdl.c | - | s_ovl_conv | file_static | keep | - | host present slots and window |
+| src/video/fb_present_sdl.c | - | s_vkwin | file_static | keep | - | presenter window, Vulkan surface mode |
+| src/video/fb_present_sdl.c | - | s_vkwin_win | file_static | keep | - | presenter window, Vulkan surface mode |
+
+### src/video/touch_pad.c
+
+| file | scope | name | kind | class | hook | why |
+|---|---|---|---|---|---|---|
+| src/video/touch_pad.c | - | s_f | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | - | s_lock | file_static | keep | - | host lock over the controls; never held at a stop point |
+| src/video/touch_pad.c | - | s_on | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | - | s_auto | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | - | s_key_seen | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | - | s_dev_off | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | - | s_touch_back | file_static | keep | - | on-screen controls, host UI; fingers and device state continue |
+| src/video/touch_pad.c | touch_ext_pad | packet | local_static | keep | - | packet counter the controls report; only moves forward |
 
 ### src/video/gpu_present.c
 
