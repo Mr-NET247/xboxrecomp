@@ -4001,8 +4001,11 @@ static int sw_create(void)
     ci.imageArrayLayers = 1;
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    /* The surface's own transform: the compositor does no rotation. */
-    ci.preTransform = caps.currentTransform;
+    /* Identity: the frame as drawn, and the compositor turns it to the
+     * screen. The surface's own transform (90 degrees on a phone held
+     * landscape) would say it was already turned, and it was not. */
+    ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+                      ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR : caps.currentTransform;
     ci.compositeAlpha = (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR)
                         ? VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR
                         : VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
