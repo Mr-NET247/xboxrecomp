@@ -159,6 +159,17 @@ static void present_pixels(const uint8_t *src, uint32_t w, uint32_t h,
 
 /* Whether the window is up and takes frames: a GPU backend skips its
  * readback for the window when not (headless). */
+/* Android with the Vulkan backend: the window is a Vulkan surface the
+ * backend presents to itself (nv2a_pb_vulkan.c's swapchain), no SDL
+ * renderer; this thread only pumps events and touches. */
+static int s_vkwin;
+static SDL_Window *s_vkwin_win;
+
+SDL_Window *xbox_FramebufferWindowVulkan(void)
+{
+    return __atomic_load_n(&s_vkwin, __ATOMIC_ACQUIRE) ? s_vkwin_win : NULL;
+}
+
 int xbox_FramebufferWindowRunning(void)
 {
     return __atomic_load_n(&s_running, __ATOMIC_SEQ_CST) != 0;
@@ -898,6 +909,21 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             }
         }
 #endif
+#if defined(__ANDROID__)
+        {
+            const char *be = recomp_env(RENV_PB_BACKEND);
+            const char *vp = getenv("RECOMP_VK_PRESENT");
+            if (be && !strcasecmp(be, "vulkan") && !(vp && vp[0] == '0')) {
+                win = SDL_CreateWindow(window_name(), win_w, 480 * scale,
+                                       wflags | SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
+                if (win) {
+                    s_vkwin_win = win;
+                    __atomic_store_n(&s_vkwin, 1, __ATOMIC_RELEASE);
+                    s_layer = 1;   /* no SDL renderer: the backend presents */
+                }
+            }
+        }
+#endif
         if (!s_layer) {
             win = SDL_CreateWindow(window_name(), win_w, 480 * scale, wflags);
             if (win && eo->fullscreen)
@@ -916,7 +942,10 @@ int xbox_HostWindowMain(int (*guest_main)(void))
             }
         }
     }
-    if (s_layer) {
+    if (s_vkwin) {
+        fprintf(stderr, "[PRESENT] window up: Vulkan surface (the backend's swapchain);"
+                " guest runs on a pthread\n");
+    } else if (s_layer) {
         fprintf(stderr, "[PRESENT] window up: CAMetalLayer (zero-copy), vsync %s;"
                 " guest runs on a pthread\n", vsync ? "on" : "off");
     } else {
@@ -1016,6 +1045,8 @@ int xbox_HostWindowMain(int (*guest_main)(void))
         /* The capture can change on the poll thread (the release key, a
          * script); relative mode has to be set here, on the window's. */
         xbox_InputSdlMouseSync(win);
+        if (s_vkwin)
+            continue;   /* the backend draws and presents; events only here */
         /* Text input for a menu field, asked for on the guest's thread;
          * SDL wants it started and stopped on this one. */
         xbox_InputSdlTextSync(win);
